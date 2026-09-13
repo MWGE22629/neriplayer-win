@@ -14,11 +14,11 @@
 
 ## 开发
 
+本仓库统一使用 [uv](https://docs.astral.sh/uv/) 管理环境(规则见 [AGENTS.md](./AGENTS.md)):
+
 ```bash
-python -m venv .venv
-source .venv/Scripts/activate   # CMD: .venv\Scripts\activate.bat
-pip install -e .
-neriplayer-win                  # 或 python -m neriplayer_win
+uv sync                # 创建 .venv 并安装依赖(自动匹配 .python-version)
+uv run neriplayer-win  # 或 uv run python -m neriplayer_win
 ```
 
 > 播放内核基于 libmpv:运行时需要 `mpv-2.dll`(M1 接入播放时提供,详见 TODO)。
