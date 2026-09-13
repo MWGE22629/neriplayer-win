@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neriplayer-win"
+version = "0.1.0"
+description = "NeriPlayer Windows 桌面客户端:网易云 + B站,扫码登录 / 歌单 / 播放"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+dependencies = [
+    "PySide6>=6.6",
+    "python-mpv>=1.0.7",
+    "httpx>=0.27",
+    "pycryptodome>=3.20",
+]
+
+[project.scripts]
+neriplayer-win = "neriplayer_win.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
