@@ -44,7 +44,10 @@ class BrowserLoginDialog(QDialog):
 
         self._profile = QWebEngineProfile(self)  # off-the-record,会话隔离
         self._profile.setHttpUserAgent(_DESKTOP_UA)
-        self._profile.setUrlRequestInterceptor(NeteaseCdnFallbackInterceptor(self))
+        # 注意:setUrlRequestInterceptor 不接管对象生命周期,
+        # 必须持有引用,否则被 GC 后拦截静默失效
+        self._interceptor = NeteaseCdnFallbackInterceptor(self)
+        self._profile.setUrlRequestInterceptor(self._interceptor)
         cookie_store = self._profile.cookieStore()
         cookie_store.cookieAdded.connect(self._on_cookie_added)
 
