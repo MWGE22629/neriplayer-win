@@ -21,3 +21,6 @@ Thumbs.db
 
 # 运行期本地数据
 *.local.json
+
+# mpv 运行库(脚本/文档见 player/engine.py)
+/bin/

@@ -14,10 +14,28 @@ dependencies = [
     "python-mpv>=1.0.7",
     "httpx>=0.27",
     "pycryptodome>=3.20",
+    "segno>=1.6.6",
 ]
 
 [project.scripts]
 neriplayer-win = "neriplayer_win.app:main"
 
+[[tool.uv.index]]
+url = "https://mirrors.cloud.tencent.com/pypi/simple"
+default = true
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+# 关闭 pytest 自带的 faulthandler:libmpv(LuaJIT)在 Windows 上会周期性
+# 抛出自定义 SEH 异常(0xE24C4A02)用于内部控制流,faulthandler 会把这类
+# 本被自身处理器吞掉的异常打印成 "Windows fatal exception",且其过滤器
+# 在异常处理中途于外来线程执行 Python 代码,偶发升级为进程级崩溃。
+addopts = "-p no:faulthandler"
+testpaths = ["tests"]

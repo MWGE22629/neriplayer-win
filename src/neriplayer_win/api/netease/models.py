@@ -1,0 +1,81 @@
+"""网易云 API 数据模型与异常类型。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+class NeteaseApiError(Exception):
+    """网易云接口通用异常(网络失败 / HTTP 错误 / 返回异常)。"""
+
+    def __init__(self, message: str, *, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class NeteaseAuthRequiredError(NeteaseApiError):
+    """登录态缺失或已失效(接口返回 301 等),需要重新登录。"""
+
+
+class NeteaseNoPermissionError(NeteaseApiError):
+    """无权限播放(VIP / 版权受限 / 无可用音质)。"""
+
+
+class NeteaseNoPlayUrlError(NeteaseApiError):
+    """接口未返回播放地址。"""
+
+
+@dataclass(frozen=True)
+class NeteaseAccount:
+    user_id: int
+    nickname: str
+
+
+@dataclass(frozen=True)
+class QrLoginSession:
+    """扫码登录会话(对应 Kotlin NeteaseQrLoginSession)。"""
+
+    key: str
+    chain_id: str
+    yd_device_token: str
+    qr_content: str
+
+
+@dataclass(frozen=True)
+class QrLoginCheckResult:
+    """扫码轮询结果(对应 Kotlin NeteaseQrLoginCheckResult)。
+
+    code: 800 过期 / 801 等待扫码 / 802 已扫待确认 / 803 成功。
+    """
+
+    code: int
+    message: str
+    cookies: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def is_confirmed(self) -> bool:
+        return self.code == 803
+
+
+@dataclass(frozen=True)
+class NeteasePlaylist:
+    id: int
+    name: str
+    track_count: int
+    special_type: int = 0
+    is_liked: bool = False
+
+
+@dataclass(frozen=True)
+class NeteaseSong:
+    id: int
+    title: str
+    artist: str
+    duration_ms: int = 0
+
+
+@dataclass(frozen=True)
+class PlayableUrl:
+    url: str
+    level: str | None = None
+    is_preview: bool = False
