@@ -27,4 +27,7 @@ def test_body_layout_renders_central_and_player_bar(qapp, monkeypatch, tmp_path)
         # 侧栏与右列并存于 splitter
         assert window._splitter.count() == 2
     finally:
+        # 真实平台下托盘可用,close 默认走"收托盘"分支不触发清理
+        # (媒体热键仍被占,污染后续测试),故强制真退出路径
+        window._force_exit = True
         window.close()
