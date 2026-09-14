@@ -884,6 +884,7 @@ class MainWindow(QMainWindow):
         """主题切换的全量资源刷新(ThemeManager 已换全局 QSS)。"""
         self.player_bar.retheme()
         self._empty_state.retheme()
+        self.settings_page.retheme_link()
         self._apply_sidebar_icons()
         if self._tray is not None:
             self._tray.set_icon(tray_icon(name))

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
+from . import theme
 
 _CLOSE_EXIT = "exit"
 _CLOSE_TRAY = "tray"
@@ -83,6 +84,7 @@ class SettingsPage(QWidget):
         self.about_link = QLabel(f'<a href="{_UPSTREAM_URL}">上游仓库:{_UPSTREAM_URL}</a>')
         self.about_link.setOpenExternalLinks(True)
         self.about_link.setObjectName("aboutLink")
+        self.retheme_link()
         about_layout.addWidget(about_name)
         about_layout.addWidget(about_license)
         about_layout.addWidget(self.about_link)
@@ -104,6 +106,17 @@ class SettingsPage(QWidget):
 
         # 默认勾选与持久化默认一致(close_action 默认 tray)
         self.tray_radio.setChecked(True)
+
+    # -- 主题 ------------------------------------------------------------------
+
+    def retheme_link(self) -> None:
+        """富文本锚点颜色既不吃 QSS 的 color 也不吃 QPalette.Link,
+        唯一可靠路径是内联 HTML style;主题切换时按主色重生成文本。"""
+        primary = theme.current_palette()["primary"]
+        self.about_link.setText(
+            f'<a href="{_UPSTREAM_URL}" style="color:{primary};">'
+            f"上游仓库:{_UPSTREAM_URL}</a>"
+        )
 
     # -- 用户交互 --------------------------------------------------------------
 
