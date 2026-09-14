@@ -38,11 +38,8 @@ def test_create_qr_session_smoke():
         pytest.skip(f"网络不可用,跳过冒烟: {error}")
     try:
         assert session.key
-        assert session.qr_content.startswith(
-            "https://music.163.com/st/platform/scanlogin"
-        )
-        assert "codekey=" in session.qr_content
-        assert "chainId=" in session.qr_content
+        assert session.qr_content.startswith("https://music.163.com/login?codekey=")
+        assert f"codekey={session.key}" in session.qr_content
         assert session.chain_id.startswith("v1_")
         assert "web_login" in session.chain_id
     finally:

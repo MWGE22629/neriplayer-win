@@ -450,7 +450,7 @@ class NeteaseClient:
 
     def ensure_weapi_session(self) -> None:
         """访问一次站点首页,通常会下发 __csrf 等 Cookie。"""
-        self._request(
+        self.request(
             url=f"https://{NETEASE_MAIN_HOST}/",
             params={},
             mode="API",
@@ -1004,9 +1004,12 @@ class NeteaseClient:
 
     @staticmethod
     def _build_scan_login_url(key: str, chain_id: str) -> str:
-        """对应 buildScanLoginUrl。"""
-        return (
-            f"https://{NETEASE_MAIN_HOST}/st/platform/scanlogin"
-            f"?codekey={key}&chainId={chain_id}"
-            f"&hdw_device=web&hdw_appid=web&hitExp=1"
-        )
+        """扫码二维码内容。
+
+        上游 Kotlin 用 /st/platform/scanlogin(新式登录页),但该页是
+        "Netease Fan Connect" JS 壳,逻辑依赖 CDN 脚本,部分手机 App 版本
+        的内嵌 WebView 打不开(实测现象:扫码后提示连不上官方登录页面)。
+        改用多年稳定的传统格式 music.163.com/login?codekey=,unikey 与
+        轮询端点完全相同;chain_id 仅服务于新式页面的遥测,保留参数但不进 URL。
+        """
+        return f"https://{NETEASE_MAIN_HOST}/login?codekey={key}"
