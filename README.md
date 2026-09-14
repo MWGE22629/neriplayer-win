@@ -1,61 +1,108 @@
-# NeriPlayer Win
+<h1 align="center">NeriPlayer Win</h1>
 
-网易云 + Bilibili 的 Windows 桌面音乐播放器(Python + PySide6 + libmpv)。
-自用优先、轻量优先:扫码登录、读取收藏/歌单、在线播放。
+<div align="center">
 
-衍生自 [NeriPlayer](https://github.com/cwuom/NeriPlayer)(GPL-3.0),
-音源 API 行为以其 Android 实现为参考翻译。
+<h3>✨ 一个把网易云与 Bilibili 搬进 Windows 桌面的轻量音频播放器 🎵</h3>
 
-## 仓库结构
+<p>
+  <a href="https://github.com/MWGE22629/neriplayer-win/releases">
+    <img alt="Release" src="https://img.shields.io/github/v/release/MWGE22629/neriplayer-win?label=Release" />
+  </a>
+  <a href="https://github.com/MWGE22629/neriplayer-win/releases">
+    <img alt="Downloads" src="https://img.shields.io/github/downloads/MWGE22629/neriplayer-win/total?style=social" />
+  </a>
+  <img alt="Platform" src="https://img.shields.io/badge/Platform-Windows%2010%2B%20x64-0078D6?logo=windows&logoColor=white" />
+  <img alt="License" src="https://img.shields.io/badge/License-GPL--3.0-blue" />
+</p>
 
-- `src/neriplayer_win/` — 本项目代码
-- `reference/NeriPlayer-Android/` — 上游 Android 参考实现(自带独立 git 历史,已被 gitignore,不参与构建)
-- `TODO.md` — 蓝图与进度(只写做什么)
+<p>
+  <img src="https://github.com/MWGE22629/neriplayer-win/raw/main/src/neriplayer_win/assets/app.ico" width="140" alt="NeriPlayer Win" />
+</p>
 
-## 开发
+</div>
 
-本仓库统一使用 [uv](https://docs.astral.sh/uv/) 管理环境(规则见 [AGENTS.md](./AGENTS.md)):
+> [!WARNING]
+> 本项目仅供学习与研究使用,请勿将其用于任何非法用途。
+> 请只在你拥有权利、授权或第三方平台规则允许的范围内访问、播放内容。
+> 本项目不提供媒体内容、密钥或规避付费/DRM/地区限制的方案,
+> 也不提供任何公共媒体代理或再分发服务。
 
-```bash
-uv sync                # 创建 .venv 并安装依赖(自动匹配 .python-version)
-uv run neriplayer-win  # 或 uv run python -m neriplayer_win
-```
+---
 
-> 播放内核基于 libmpv:运行时需要 `mpv-2.dll`(M1 接入播放时提供,详见 TODO)。
+## 快速体验 / Getting Started
 
-## 构建与分发
+1. 前往 [Releases](https://github.com/MWGE22629/neriplayer-win/releases)
+   下载最新的 `NeriPlayer-win-*.zip`;
+2. 解压到任意目录(保持文件夹结构完整,`bin/` 内是 mpv 播放运行库);
+3. 双击 `NeriPlayerWin.exe` —— 免安装,无需预装 Python、mpv 或任何运行时。
 
-一条命令把应用打包为**免装 Python / mpv 的独立发行目录**(Nuitka 编译为原生码):
+> [!NOTE]
+> 首次使用请在应用内完成网易云 / Bilibili 登录:内嵌浏览器会打开平台
+> 官方登录页,扫码、手机号等方式均可,登录成功后自动进入应用,重启免再次登录。
 
-```bash
-uv run python tools/build_exe.py
-```
+---
 
-- 前置:仓库 `bin/mpv-2.dll` 就位(gitignore,下载方式见
-  [player/engine.py](./src/neriplayer_win/player/engine.py) 模块注释);
-  首次构建会自动获取 MinGW 工具链(GitHub 直连不可达时脚本会经镜像
-  下载到 Nuitka 本地缓存,见 `tools/build_exe.py`)。首次全量编译约
-  10~30 分钟,之后增量约 1~2 分钟。
-- 产物:`dist/neriplayer-win/`(约 465MB,159 个文件)——`NeriPlayerWin.exe`
-  + Qt/WebEngine 运行时 + `bin/mpv-2.dll` + `LICENSE`/`README.md`。
-  精确体积明细与瘦身说明见 [docs/PERF.md](./docs/PERF.md)。
-- 分发:整个 `dist/neriplayer-win/` 目录打成 zip 即可;用户解压后双击
-  `NeriPlayerWin.exe` 运行(从终端启动请先 cd 进该目录——mpv-2.dll 按
-  exe 所在目录的 `bin/` 相对定位)。不做 onefile:单文件模式每次启动
-  都要自解压临时目录,违背冷启动 ≤1.5s 的目标。
-- 性能验收(M4 实测:冷启动中位 530ms / 常驻 141MB,达标):
-  `uv run python tools/measure_perf.py --target both`。
+## 核心特性 / Key Features
 
-### GPL-3.0 分发注意
+- 🎧 **双音源**:网易云音乐(「我喜欢的音乐」与自建歌单)与
+  Bilibili 收藏夹,以歌单视角统一呈现;
+- 🔐 **网页登录**:内嵌浏览器打开官方登录页,支持平台提供的任意登录方式,
+  应用本身不经手账号密码;
+- 📋 **统一播放队列**:网易云与 B 站歌曲混排进同一队列,支持
+  顺序 / 随机 / 单曲循环,一首播完自动接下一首,队列窗口可查看与切跳;
+- ▶️ **完整播放控制**:播放 / 暂停、上一首 / 下一首、进度拖动、音量调节,
+  支持系统全局媒体键;
+- 🖼️ **封面与主题**:播放条展示歌曲封面,Material 配色,
+  亮色 / 暗色外观可切换;
+- 📍 **最小化到托盘**:关窗口不退出,托盘图标常驻,后台继续播放;
+- 🔁 **登录态本地持久化**:重启免登录,过期可感知并提示重新登录。
 
-本项目衍生自 [NeriPlayer](https://github.com/cwuom/NeriPlayer)(GPL-3.0),
-发行包内已附带 `LICENSE`;对外分发时须保持许可证与衍生标注(exe 属性、
-README 均已注明),并以源码形式提供对应版本的完整对应源码(本仓库)。
-发行包同时包含按各自条款分发的第三方组件:Qt(PySide6,LGPL/GPL,
-含 QtWebEngine/Chromium)、libmpv(mpv,LGPL/GPL,shinchiro 构建)、
-Python 3.12(PSF)、httpx/segno/pycryptodome/python-mpv 等(见各包许可证)。
+---
 
-## 许可
+## 平台特点 / Why Windows Native
 
-GPL-3.0(见 [LICENSE](./LICENSE))。仅供学习与研究,
-请只在平台规则与账号授权允许的范围内使用。
+- **原生桌面应用**:基于 Qt(PySide6),窗口、托盘、媒体键都是 Windows
+  原生体验,双击即开,后台不驻留任何服务;
+- **mpv 播放内核**:音频播放由 libmpv 承担,解码能力与稳定性同 mpv 一致;
+- **浏览器级风控兼容**:登录发生在真实网页上下文里,指纹与风控由平台
+  自身的 SDK 完成,比客户端直连方案更稳。
+
+---
+
+## 轻量与隐私 / Lightweight & Private
+
+- **轻量是硬指标**:实测冷启动中位约 0.5s、常驻内存约 140MB;
+  无遥测、无统计 SDK、无开机自启;
+- **只访问官方接口**:除 music.163.com / bilibili.com 及其 CDN 外,
+  不连接任何第三方服务器;
+- **凭据纯本地**:登录 Cookie 只保存在本机 `%APPDATA%\neriplayer-win\`,
+  不会上传到任何地方;
+- **无痕登录会话**:内嵌登录浏览器为 off-the-record 会话,不落盘浏览
+  记录与缓存;删除上述本地目录即彻底清除全部数据。
+
+---
+
+## 问题反馈 / Bug Report
+
+使用中遇到问题欢迎到 [Issues](https://github.com/MWGE22629/neriplayer-win/issues)
+提交,附上 Windows 版本、应用版本与复现步骤即可。
+
+---
+
+## 鸣谢 / Reference
+
+- [NeriPlayer](https://github.com/cwuom/NeriPlayer) —
+  本项目衍生自它的 Android 实现,音源 API 行为以其为参考翻译;
+- [mpv](https://mpv.io) / [mpv-winbuild](https://github.com/shinchiro/mpv-winbuild-cmake) —
+  播放内核与 Windows 运行库来源。
+
+---
+
+## 许可证 / License
+
+本项目以 **GPL-3.0** 开源,详见 [LICENSE](./LICENSE)。
+
+- ✅ 你可以自由使用、修改和分发本软件;
+- ⚠️ 分发修改版时须继续遵守 GPL-3.0,并保留对上游 NeriPlayer 的衍生标注;
+- 🧩 发行包内含 Qt / QtWebEngine(PySide6)、libmpv、Python 及若干
+  PyPI 依赖,均按各自许可条款随包分发,对应源码见本仓库与各上游项目。

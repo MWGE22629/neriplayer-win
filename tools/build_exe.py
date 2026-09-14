@@ -13,11 +13,10 @@
 - 单目录分发,不做 onefile(onefile 每次启动要自解压临时目录,违背 ≤1.5s
   冷启动目标;单目录还能按需只读加载 DLL)。
 - mpv-2.dll 的定位沿用 src/neriplayer_win/player/engine.py 的候选逻辑:
-  引擎按「仓库根/bin」「当前工作目录/bin」两处查找;打包后引擎模块的
-  __file__ 位于 <发行目录>/neriplayer_win/player/engine.py,parents[3]
-  已越出发行目录,因此发行目录内放 bin/mpv-2.dll,依赖「双击启动时
-  cwd == exe 所在目录」这一 Windows 默认行为(资源管理器/快捷方式均如此;
-  从终端启动需先 cd 到发行目录,README 已注明)。
+  引擎按「sys.executable 所在目录/bin」「仓库根/bin」「当前工作目录/bin」
+  依次查找。打包后 sys.executable 即发行目录内的 NeriPlayerWin.exe,
+  因此发行目录内放 bin/mpv-2.dll 后,无论双击、快捷方式还是从任意目录
+  终端启动都能定位到运行库。
 - MinGW 工具链:Nuitka 在无 MSVC 的机器上会自动下载 winlibs gcc(仅托管在
   GitHub)。本脚本在启动 Nuitka 前检查其缓存,若缺失则先经 GitHub 加速
   镜像下载同版本 zip 到 Nuitka 缓存(%LOCALAPPDATA%/Nuitka/Cache),保证

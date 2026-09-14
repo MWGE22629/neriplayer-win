@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -55,9 +56,13 @@ def build_http_header_fields_option(headers) -> str:
 
 
 def _candidate_dll_paths() -> list[Path]:
+    # 打包 exe 时 __file__ 在解包目录,不可靠;优先用 sys.executable 所在
+    # 目录(Nuitka 打包后即 exe 目录),开发态是 .venv/Scripts/bin(不存在,无害)
+    exe_dir = Path(sys.executable).resolve().parent
     here = Path(__file__).resolve()
     repo_root = here.parents[3]
     return [
+        exe_dir / "bin" / "mpv-2.dll",
         repo_root / "bin" / "mpv-2.dll",
         Path.cwd() / "bin" / "mpv-2.dll",
     ]
@@ -71,7 +76,7 @@ def _preload_mpv_dll() -> Path:
     raise PlayerEngineError(
         "未找到 mpv 运行库(mpv-2.dll)。\n"
         "请到 https://github.com/shinchiro/mpv-winbuild-cmake/releases 下载\n"
-        "mpv-dev-x86_64-*.7z,解压出其中的 mpv-2.dll 放到本仓库 bin/ 目录后重启应用。"
+        "mpv-dev-x86_64-*.7z,解压出其中的 mpv-2.dll 放到程序所在目录的 bin/ 文件夹后重启应用。"
     )
 
 
