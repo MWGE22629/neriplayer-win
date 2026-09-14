@@ -14,9 +14,16 @@ if sys.platform == "win32":
     except OSError:
         pass
 
+from PySide6.QtCore import QLoggingCategory
 from PySide6.QtWidgets import QApplication
 
 from .ui.main_window import MainWindow
+
+# 静音 qt.qpa.fonts 的 Fixedsys 告警:QtWebEngine 请求等宽字体回退时会
+# 点名 Windows 古老位图字体 Fixedsys,DirectWrite 无法为它生成字形,
+# Qt 会自动换用其他等宽字体——功能无影响,仅刷屏。此规则的代价是
+# 同时屏蔽该类别下其他字体告警(实际几乎只有这一种噪音)。
+QLoggingCategory.setFilterRules("qt.qpa.fonts.warning = false")
 
 
 def main() -> int:
