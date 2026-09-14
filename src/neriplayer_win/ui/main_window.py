@@ -221,7 +221,7 @@ class MainWindow(QMainWindow):
         # 侧栏宽度可拖动调整,比例钳制在窗口宽度的 1/10 ~ 1/2(_clamp_sidebar_width)
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.setContentsMargins(0, 0, 0, 0)
-        self._splitter.setHandleWidth(4)
+        self._splitter.setHandleWidth(6)
         self._splitter.addWidget(self.sidebar)
         self._splitter.addWidget(body)
         self._splitter.setStretchFactor(0, 0)

@@ -139,12 +139,12 @@ QLabel#aboutLink {
     font-size: 13px;
 }
 
-/* 侧栏拖动把手(QSplitter) */
+/* 侧栏拖动把手(QSplitter):常显细线,悬停加粗提示可拖 */
 QSplitter::handle {
-    background: transparent;
+    background: @outlineVariant;
 }
 QSplitter::handle:hover {
-    background: @outlineVariant;
+    background: @primary;
 }
 
 /* ---- 侧栏(QListWidget 同时服务队列窗口列表) --------------------------- */
