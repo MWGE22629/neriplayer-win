@@ -67,13 +67,15 @@ def _netease_song_to_queue(song: NeteaseSong) -> QueueSong:
     return QueueSong(
         source="netease", id=song.id, bvid="", title=song.title,
         artist=song.artist, duration_ms=song.duration_ms,
+        cover_url=song.cover_url,
     )
 
 
-def _bili_item_to_queue(avid: int, bvid: str, title: str, upper: str, duration_sec: int) -> QueueSong:
+def _bili_item_to_queue(avid: int, bvid: str, title: str, upper: str, duration_sec: int,
+                        cover_url: str = "") -> QueueSong:
     return QueueSong(
-        source="bili", id=avid, bvid=bvid, title=title,
-        artist=upper, duration_ms=duration_sec * 1000,
+        source="bili", id=avid, bvid=bvid, title=title, artist=upper,
+        duration_ms=duration_sec * 1000, cover_url=cover_url,
     )
 
 
@@ -491,7 +493,7 @@ class MainWindow(QMainWindow):
                 [
                     _bili_item_to_queue(
                         item.id, item.bvid or "", item.title or "", item.upper_name,
-                        item.duration_sec,
+                        item.duration_sec, item.cover_url,
                     )
                     for item in playable
                 ]
@@ -698,9 +700,8 @@ class MainWindow(QMainWindow):
             return
         self._queue.jump(index)
         self._resolving = True
-        self.player_bar.set_track(
-            f"{song.title} - {song.artist}" if song.artist else song.title
-        )
+        self.player_bar.set_track(song.title, song.artist)
+        self.player_bar.set_cover(song.cover_url)
         self.statusBar().showMessage(f"正在解析播放地址:{song.title}")
 
         if song.source == "bili":

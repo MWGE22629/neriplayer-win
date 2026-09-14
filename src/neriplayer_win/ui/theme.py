@@ -133,6 +133,10 @@ QLabel#trackLabel {
     font-size: 15px;
     color: @onSurface;
 }
+QLabel#artistLabel {
+    font-size: 13px;
+    color: @onSurfaceVariant;
+}
 /* 关于页链接:跟随主题主色,亮色下依旧可读 */
 QLabel#aboutLink {
     color: @primary;

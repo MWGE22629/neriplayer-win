@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -10,7 +11,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .icons import tinted_icon
+from . import theme
+from .covers import CoverLoader
+from .icons import tinted_icon, tinted_icon_with_color
 
 # 播放模式 -> 图标名(顺序=按列表播 / 随机 / 单曲循环)
 _MODE_ICON = {
@@ -19,19 +22,69 @@ _MODE_ICON = {
     "repeat_one": "repeat_one",
 }
 
+_COVER_SIZE = 40
+_COVER_RADIUS = 8
+
 
 def format_seconds(seconds: float) -> str:
     seconds = max(0, int(seconds))
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
+class ElidedLabel(QLabel):
+    """超长文本以 … 截断的自适应标签(宽度变化时重新截断)。"""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._full_text = text
+        self.setMinimumWidth(0)
+        self.setSizePolicy(self.sizePolicy().horizontalPolicy(),
+                           self.sizePolicy().verticalPolicy())
+
+    def set_text_elided(self, text: str) -> None:
+        self._full_text = text
+        self._reapply()
+
+    def _reapply(self) -> None:
+        metrics = QFontMetrics(self.font())
+        available = max(self.width() - 8, 10)
+        self.setText(metrics.elidedText(
+            self._full_text, Qt.TextElideMode.ElideRight, available
+        ))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().resizeEvent(event)
+        self._reapply()
+
+
+def rounded_pixmap(source: QPixmap, size: int, radius: int) -> QPixmap:
+    """等比裁成正方形并画圆角。"""
+    square = source.scaled(
+        size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    cropped = square.copy(
+        (square.width() - size) // 2, (square.height() - size) // 2, size, size
+    )
+    result = QPixmap(size, size)
+    result.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(result)
+    try:
+        path = QPainterPath()
+        path.addRoundedRect(0, 0, size, size, radius, radius)
+        painter.setClipPath(path)
+        painter.drawPixmap(0, 0, cropped)
+    finally:
+        painter.end()
+    return result
+
+
 class PlayerBar(QWidget):
     """底部播放条:两行布局。
 
     第一行:当前时间 + 进度条(可拖 seek,独占整行)+ 总时长;
-    第二行:歌曲信息 + 播放控制 + 音量。M4 起控制键均为 SVG 图标
-    (单色随主题染色,见 ui/icons.py),状态经 tooltip / accessibleName
-    暴露给无障碍与测试。
+    第二行:封面小图 + 歌名/作者(两行,超长 … 截断)+ 播放控制 + 音量。
+    M4 起控制键均为 SVG 图标(单色随主题染色,见 ui/icons.py)。
     """
 
     play_pause_clicked = Signal()
@@ -47,9 +100,30 @@ class PlayerBar(QWidget):
         self._dragging = False
         self._mode_value = "sequence"
         self._playing = False
+        self._cover_url = ""
 
-        self.track_label = QLabel("未在播放")
+        # 封面小图(40x40 圆角;加载中/缺失显示淡色音符占位)
+        self.cover_label = QLabel()
+        self.cover_label.setFixedSize(_COVER_SIZE, _COVER_SIZE)
+        self.cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cover_loader = CoverLoader(self)
+        self.cover_loader.cover_ready.connect(self._on_cover_ready)
+        self._show_cover_placeholder()
+
+        self.track_label = ElidedLabel("未在播放")
         self.track_label.setObjectName("trackLabel")
+        self.artist_label = ElidedLabel("")
+        self.artist_label.setObjectName("artistLabel")
+        info_block = QVBoxLayout()
+        info_block.setContentsMargins(0, 0, 0, 0)
+        info_block.setSpacing(0)
+        info_block.addWidget(self.track_label)
+        info_block.addWidget(self.artist_label)
+        # 文本块封顶宽度:长标题截断为 …,不把窗口/控制键挤走
+        info_container = QWidget()
+        info_container.setLayout(info_block)
+        info_container.setMaximumWidth(420)
+        info_container.setMinimumWidth(120)
 
         self.current_time_label = QLabel("00:00")
         self.total_time_label = QLabel("00:00")
@@ -98,7 +172,8 @@ class PlayerBar(QWidget):
         controls_row = QHBoxLayout()
         controls_row.setContentsMargins(0, 0, 0, 0)
         controls_row.setSpacing(8)
-        controls_row.addWidget(self.track_label)
+        controls_row.addWidget(self.cover_label)
+        controls_row.addWidget(info_container)
         controls_row.addStretch(1)
         controls_row.addWidget(self.mode_button)
         controls_row.addWidget(self.prev_button)
@@ -132,8 +207,31 @@ class PlayerBar(QWidget):
 
     # -- 对外状态 ------------------------------------------------------------
 
-    def set_track(self, title: str) -> None:
-        self.track_label.setText(title)
+    def set_track(self, title: str, artist: str = "") -> None:
+        self.track_label.set_text_elided(title)
+        self.artist_label.set_text_elided(artist)
+
+    def set_cover(self, url: str) -> None:
+        """请求封面;空 URL 直接回到占位图。回调按 url 比对丢弃过期结果。"""
+        self._cover_url = url
+        if not url:
+            self._show_cover_placeholder()
+            return
+        self.cover_loader.request(url)
+
+    def _on_cover_ready(self, url: str, data: bytes) -> None:
+        if url != self._cover_url:
+            return  # 已切歌,过期结果丢弃
+        pixmap = QPixmap()
+        if pixmap.loadFromData(data):
+            self.cover_label.setPixmap(
+                rounded_pixmap(pixmap, _COVER_SIZE, _COVER_RADIUS)
+            )
+
+    def _show_cover_placeholder(self) -> None:
+        color = QColor(theme.current_palette().get("onSurfaceVariant", "#888888"))
+        icon = tinted_icon_with_color("playlist_play", color)
+        self.cover_label.setPixmap(icon.pixmap(QSize(28, 28)))
 
     def set_mode(self, mode_value: str, display_name: str = "") -> None:
         """更新播放模式按钮(由 MainWindow 在模式变化时调用)。
@@ -181,6 +279,8 @@ class PlayerBar(QWidget):
     def retheme(self) -> None:
         """主题切换后重取染色图标(icons 缓存已由 ThemeManager 清空)。"""
         self._apply_icons()
+        if not self._cover_url:
+            self._show_cover_placeholder()
 
     # -- 图标 ----------------------------------------------------------------
 

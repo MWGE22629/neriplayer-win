@@ -86,6 +86,7 @@ class NeteaseSong:
     title: str
     artist: str
     duration_ms: int = 0
+    cover_url: str = ""
 
 
 @dataclass(frozen=True)

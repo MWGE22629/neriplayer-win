@@ -62,6 +62,7 @@ class QueueSong:
     title: str
     artist: str  # 歌手 / UP主
     duration_ms: int
+    cover_url: str = ""  # 封面原图 URL(播放条按 CDN 规则换低清版)
 
 
 class PlayQueue(QObject):

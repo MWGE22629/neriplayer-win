@@ -253,11 +253,16 @@ def _parse_song_item(track: Mapping[str, Any]) -> NeteaseSong | None:
         if isinstance(artist, dict) and artist.get("name"):
             names.append(str(artist["name"]))
     duration_ms = int(track.get("dt") or track.get("duration") or 0)
+    album = track.get("al")
+    cover_url = ""
+    if isinstance(album, dict):
+        cover_url = str(album.get("picUrl") or "")
     return NeteaseSong(
         id=int(song_id),
         title=str(name),
         artist=" / ".join(names),
         duration_ms=duration_ms,
+        cover_url=cover_url,
     )
 
 
