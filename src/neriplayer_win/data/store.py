@@ -1,13 +1,16 @@
-"""本地持久化:登录 cookie 与账号信息。
+"""本地持久化:登录 cookie 与账号信息(网易云 netease.json + B站 bili.json)。
 
-存放于 %APPDATA%/neriplayer-win/netease.json(可用环境变量
-NERIPLAYER_WIN_DATA_DIR 覆盖以便测试)。
+存放于 %APPDATA%/neriplayer-win/(可用环境变量 NERIPLAYER_WIN_DATA_DIR
+覆盖以便测试)。
 
-格式对照 reference/NeriPlayer-Android 的
-data/auth/netease/NeteaseCookieRepository.kt(NeteaseAuthBundle.toJson):
-{"cookies": {name: value}, "savedAt": <epoch_ms>},本项目扩展 "profile" 节点
-保存 userId / nickname,避免每次启动都要多打一次账号接口。
-cookie 清洗规则照搬 validateAndSanitizeNeteaseCookies。
+格式对照 reference/NeriPlayer-Android:
+- data/auth/netease/NeteaseCookieRepository.kt(NeteaseAuthBundle.toJson):
+  {"cookies": {name: value}, "savedAt": <epoch_ms>},本项目扩展 "profile"
+  节点保存 userId / nickname,避免每次启动都要多打一次账号接口。
+- data/auth/bili/BiliCookieRepository.kt(BiliAuthBundle.toJson):同一
+  {"cookies", "savedAt"} 结构,登录判定键为 SESSDATA(BILI_LOGIN_COOKIE_KEYS
+  = SESSDATA / DedeUserID / bili_jct);profile 存 mid / uname。
+cookie 清洗规则照搬 validateAndSanitizeNeteaseCookies(两平台通用)。
 """
 
 from __future__ import annotations
@@ -21,9 +24,12 @@ from typing import Any
 
 _DATA_DIR_ENV = "NERIPLAYER_WIN_DATA_DIR"
 _NETEASE_FILE = "netease.json"
+_BILI_FILE = "bili.json"
 
 _COOKIE_NAME_REGEX = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _LOGIN_COOKIE_KEYS = ("MUSIC_U",)
+# BiliCookieRepository.kt 的 BILI_LOGIN_COOKIE_KEYS
+_BILI_LOGIN_COOKIE_KEYS = ("SESSDATA", "DedeUserID", "bili_jct")
 _FALLBACK_OS = "pc"
 _FALLBACK_APPVER = "8.10.35"
 
@@ -70,10 +76,15 @@ class LocalStore:
     def __init__(self, data_dir: Path | str | None = None) -> None:
         self._dir = Path(data_dir) if data_dir is not None else default_data_dir()
         self._netease_path = self._dir / _NETEASE_FILE
+        self._bili_path = self._dir / _BILI_FILE
 
     @property
     def netease_path(self) -> Path:
         return self._netease_path
+
+    @property
+    def bili_path(self) -> Path:
+        return self._bili_path
 
     # -- 网易云登录态 ---------------------------------------------------------
 
@@ -126,5 +137,66 @@ class LocalStore:
         """登录失效时清除。"""
         try:
             self._netease_path.unlink()
+        except OSError:
+            pass
+
+    # -- B站登录态 -------------------------------------------------------------
+
+    def load_bili(self) -> dict[str, Any] | None:
+        """读取 B站登录包 {"cookies", "savedAt", "profile"};无/损坏/未登录返回 None。
+
+        对应 BiliAuthBundle.fromJson + hasLoginCookies(无 SESSDATA 视为 Missing)。
+        """
+        try:
+            raw = self._bili_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            bundle = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(bundle, dict):
+            return None
+        cookies = bundle.get("cookies")
+        if not isinstance(cookies, dict) or not cookies:
+            return None
+        sanitized, _ = validate_and_sanitize_netease_cookies(
+            cookies, include_fallback_cookies=False
+        )
+        if not sanitized.get("SESSDATA", "").strip():
+            return None
+        profile = bundle.get("profile") if isinstance(bundle.get("profile"), dict) else {}
+        return {
+            "cookies": sanitized,
+            "savedAt": bundle.get("savedAt", 0),
+            "profile": profile,
+        }
+
+    def save_bili(
+        self,
+        cookies: dict[str, str],
+        profile: dict[str, Any] | None = None,
+    ) -> bool:
+        """B站登录成功后写盘;cookie 无 SESSDATA 时拒绝。"""
+        sanitized, _ = validate_and_sanitize_netease_cookies(
+            cookies, include_fallback_cookies=False
+        )
+        if not sanitized.get("SESSDATA", "").strip():
+            return False
+        bundle = {
+            "cookies": sanitized,
+            "savedAt": int(time.time() * 1000),
+            "profile": profile or {},
+        }
+        self._dir.mkdir(parents=True, exist_ok=True)
+        self._bili_path.write_text(
+            json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return True
+
+    def clear_bili(self) -> None:
+        """B站登录失效时清除。"""
+        try:
+            self._bili_path.unlink()
         except OSError:
             pass

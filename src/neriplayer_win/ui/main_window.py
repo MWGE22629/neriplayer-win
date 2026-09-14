@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -16,6 +18,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..api.bili import (
+    BiliAccount,
+    BiliApiError,
+    BiliAuthRequiredError,
+    BiliClient,
+    BiliFavFolder,
+    build_bili_stream_headers,
+)
 from ..api.netease import (
     NeteaseAccount,
     NeteaseAuthRequiredError,
@@ -25,6 +35,7 @@ from ..api.netease import (
 )
 from ..data.store import LocalStore
 from ..player.engine import PlayerEngine, PlayerEngineError
+from .browser_login import BILI_WEB_LOGIN, BrowserLoginDialog
 from .login_page import LoginPage
 from .player_bar import PlayerBar, format_seconds
 from .workers import run_async
@@ -33,9 +44,42 @@ _PAGE_LOGIN = 0
 _PAGE_TABLE = 1
 _PAGE_SETTINGS = 2
 
+_HEADER_NETEASE = ["#", "标题", "歌手", "时长"]
+_HEADER_BILI = ["#", "标题", "UP主", "时长"]
+
+
+@dataclass(frozen=True)
+class _QueueSong:
+    """统一队列条目:网易云歌曲与B站视频(收藏夹条目)同构。"""
+
+    source: str  # "netease" | "bili"
+    id: int  # 网易云 song id / B站 avid
+    bvid: str  # B站 only
+    title: str
+    artist: str  # 歌手 / UP主
+    duration_ms: int
+
+
+def _netease_song_to_queue(song: NeteaseSong) -> _QueueSong:
+    return _QueueSong(
+        source="netease", id=song.id, bvid="", title=song.title,
+        artist=song.artist, duration_ms=song.duration_ms,
+    )
+
+
+def _bili_item_to_queue(avid: int, bvid: str, title: str, upper: str, duration_sec: int) -> _QueueSong:
+    return _QueueSong(
+        source="bili", id=avid, bvid=bvid, title=title,
+        artist=upper, duration_ms=duration_sec * 1000,
+    )
+
 
 class MainWindow(QMainWindow):
-    """主窗口:左侧导航 + 中部(登录页/歌曲列表/设置占位)+ 底部播放条。"""
+    """主窗口:左侧导航(网易云歌单 + B站收藏夹)+ 歌曲列表 + 播放条。
+
+    播放队列 self._songs 是统一条目列表(来源标记 netease/bili),双击与
+    自动下一首都走 _play_index,按条目来源分发解析,两平台共用播放条。
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -46,9 +90,15 @@ class MainWindow(QMainWindow):
         self._client = NeteaseClient()
         self._account: NeteaseAccount | None = None
         self._playlists: list[NeteasePlaylist] = []
-        self._songs: list[NeteaseSong] = []
+
+        self._bili_client = BiliClient()
+        self._bili_account: BiliAccount | None = None
+        self._bili_folders: list[BiliFavFolder] = []
+
+        self._songs: list[_QueueSong] = []
         self._current_index = -1
         self._resolving = False
+        self._table_header = _HEADER_NETEASE
 
         try:
             self.engine = PlayerEngine()
@@ -63,7 +113,7 @@ class MainWindow(QMainWindow):
         self.login_page.login_succeeded.connect(self._on_login_succeeded)
 
         self.song_table = QTableWidget(0, 4)
-        self.song_table.setHorizontalHeaderLabels(["#", "标题", "歌手", "时长"])
+        self.song_table.setHorizontalHeaderLabels(_HEADER_NETEASE)
         self.song_table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.Stretch
         )
@@ -73,7 +123,7 @@ class MainWindow(QMainWindow):
         self.song_table.setAlternatingRowColors(True)
         self.song_table.cellDoubleClicked.connect(self._on_cell_double_clicked)
 
-        settings_page = QLabel("设置(M2+ 再补)")
+        settings_page = QLabel("设置(M3+ 再补)")
         settings_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.central_stack = QStackedWidget()
@@ -111,6 +161,7 @@ class MainWindow(QMainWindow):
         self.central_stack.setCurrentIndex(_PAGE_LOGIN)
         self.login_page.start()
         self._boot_from_store()
+        self._boot_bili_from_store()
 
         if self.engine is None:
             self.statusBar().showMessage(self._engine_error, 10000)
@@ -136,7 +187,26 @@ class MainWindow(QMainWindow):
             return
         self._enter_logged_in(account)
 
-    # -- 登录流程 ------------------------------------------------------------
+    def _boot_bili_from_store(self) -> None:
+        bundle = self._store.load_bili()
+        if not bundle:
+            return
+        self._bili_client.set_cookies(bundle["cookies"])
+        run_async(
+            self._bili_client.get_login_status,
+            on_done=self._on_bili_boot_status,
+            on_error=lambda message: self.statusBar().showMessage(
+                f"检查B站登录态失败:{message}"
+            ),
+        )
+
+    def _on_bili_boot_status(self, account) -> None:
+        if account is None:
+            self._handle_bili_stale_login("B站登录已过期,请点击侧栏「B站 · 收藏夹」重新登录")
+            return
+        self._enter_bili_logged_in(account)
+
+    # -- 网易云登录流程 -------------------------------------------------------
 
     def _on_login_succeeded(self, cookies: dict) -> None:
         self._store.save_netease(cookies)
@@ -176,7 +246,76 @@ class MainWindow(QMainWindow):
         self.login_page.start()
         self.statusBar().showMessage(message)
 
-    # -- 歌单 ----------------------------------------------------------------
+    # -- B站登录流程 ----------------------------------------------------------
+
+    def _open_bili_login_dialog(self) -> None:
+        dialog = BrowserLoginDialog(BILI_WEB_LOGIN, self)
+        dialog.login_cookie_ready.connect(self._on_bili_cookies)
+        dialog.exec()
+
+    def _on_bili_cookies(self, cookies: dict) -> None:
+        if not cookies.get("SESSDATA"):
+            self.statusBar().showMessage("未检测到B站登录凭据,请重试")
+            return
+        self._store.save_bili(cookies)
+        self._bili_client.set_cookies(cookies)
+        self.statusBar().showMessage("B站登录成功,正在获取账号信息…")
+        run_async(
+            self._bili_client.get_login_status,
+            on_done=self._on_bili_account_loaded,
+            on_error=lambda message: self.statusBar().showMessage(
+                f"获取B站账号信息失败:{message}"
+            ),
+        )
+
+    def _on_bili_account_loaded(self, account) -> None:
+        if account is None:
+            self._handle_bili_stale_login("B站登录态无效,请重新登录")
+            return
+        self._enter_bili_logged_in(account)
+
+    def _enter_bili_logged_in(self, account: BiliAccount) -> None:
+        self._bili_account = account
+        # 补写 profile(mid/uname),下次启动无需等 nav 就知道账号
+        cookies = self._bili_client.cookies_snapshot()
+        if cookies:
+            self._store.save_bili(cookies, profile={"mid": account.mid, "uname": account.uname})
+        self.statusBar().showMessage(
+            f"B站已登录:{account.uname or account.mid},正在读取收藏夹…"
+        )
+        self._rebuild_sidebar()
+        self._load_bili_folders()
+
+    def _handle_bili_stale_login(self, message: str) -> None:
+        self._store.clear_bili()
+        self._bili_client.logout()
+        self._bili_account = None
+        self._bili_folders = []
+        self._rebuild_sidebar()
+        self.statusBar().showMessage(message)
+
+    def _handle_bili_section_click(self) -> None:
+        """侧栏「B站 · 未登录」被点击:有残留 cookie 先验证,否则弹网页登录。"""
+        if self._bili_client.has_login():
+            self.statusBar().showMessage("正在检查B站登录态…")
+            run_async(
+                self._bili_client.get_login_status,
+                on_done=self._on_bili_section_status,
+                on_error=lambda message: self.statusBar().showMessage(
+                    f"检查B站登录态失败:{message}"
+                ),
+            )
+        else:
+            self._open_bili_login_dialog()
+
+    def _on_bili_section_status(self, account) -> None:
+        if account is not None:
+            self._enter_bili_logged_in(account)
+            return
+        self._handle_bili_stale_login("B站登录已过期,请重新登录")
+        self._open_bili_login_dialog()
+
+    # -- 网易云歌单 -----------------------------------------------------------
 
     def _load_playlists(self) -> None:
         account = self._account
@@ -200,42 +339,6 @@ class MainWindow(QMainWindow):
         self._playlists = list(playlists)
         self._rebuild_sidebar()
 
-    def _rebuild_sidebar(self) -> None:
-        self.sidebar.blockSignals(True)
-        self.sidebar.clear()
-        if self._account is None:
-            QListWidgetItem("扫码登录", self.sidebar)
-        else:
-            for playlist in self._playlists:
-                title = playlist.name
-                if playlist.track_count:
-                    title = f"{title}({playlist.track_count})"
-                item = QListWidgetItem(title, self.sidebar)
-                item.setData(Qt.ItemDataRole.UserRole, playlist.id)
-            if not self._playlists:
-                QListWidgetItem("网易云 · 歌单加载中…", self.sidebar)
-        QListWidgetItem("设置", self.sidebar)
-        self.sidebar.blockSignals(False)
-        self.sidebar.setCurrentRow(0)
-
-    def _on_sidebar_row_changed(self, row: int) -> None:
-        if row < 0:
-            return
-        item = self.sidebar.item(row)
-        if item is None:
-            return
-        if item.text() == "设置":
-            self.central_stack.setCurrentIndex(_PAGE_SETTINGS)
-            return
-        playlist_id = item.data(Qt.ItemDataRole.UserRole)
-        if playlist_id is None:
-            self.central_stack.setCurrentIndex(
-                _PAGE_LOGIN if self._account is None else _PAGE_TABLE
-            )
-            return
-        self.central_stack.setCurrentIndex(_PAGE_TABLE)
-        self._load_playlist_tracks(int(playlist_id), item.text())
-
     def _load_playlist_tracks(self, playlist_id: int, title: str) -> None:
         self.song_table.setRowCount(0)
         self.statusBar().showMessage(f"正在加载:{title}")
@@ -246,7 +349,8 @@ class MainWindow(QMainWindow):
         def on_done(songs) -> None:
             if not isinstance(songs, list):
                 return
-            self._songs = list(songs)
+            self._table_header = _HEADER_NETEASE
+            self._songs = [_netease_song_to_queue(s) for s in songs]
             self._fill_song_table()
             self.statusBar().showMessage(f"{title} · 共 {len(songs)} 首")
 
@@ -255,7 +359,138 @@ class MainWindow(QMainWindow):
 
         run_async(fetch, on_done=on_done, on_error=on_error)
 
+    # -- B站收藏夹 ------------------------------------------------------------
+
+    def _load_bili_folders(self) -> None:
+        account = self._bili_account
+        if account is None:
+            return
+
+        def fetch() -> object:
+            return self._bili_client.get_user_created_fav_folders(account.mid)
+
+        run_async(
+            fetch,
+            on_done=self._on_bili_folders_loaded,
+            on_error=lambda message: self.statusBar().showMessage(
+                f"获取B站收藏夹失败:{message}"
+            ),
+        )
+
+    def _on_bili_folders_loaded(self, folders) -> None:
+        if not isinstance(folders, list):
+            return
+        self._bili_folders = list(folders)
+        self._rebuild_sidebar()
+        self.statusBar().showMessage(f"B站收藏夹 · 共 {len(folders)} 个")
+
+    def _load_bili_folder_tracks(self, media_id: int, title: str) -> None:
+        self.song_table.setRowCount(0)
+        self.statusBar().showMessage(f"正在加载:{title}")
+
+        def fetch() -> object:
+            return self._bili_client.get_all_fav_folder_items(media_id)
+
+        def on_done(items) -> None:
+            if not isinstance(items, list):
+                return
+            playable = [item for item in items if item.playable]
+            self._table_header = _HEADER_BILI
+            self._songs = [
+                _bili_item_to_queue(
+                    item.id, item.bvid or "", item.title or "", item.upper_name,
+                    item.duration_sec,
+                )
+                for item in playable
+            ]
+            self._fill_song_table()
+            skipped = len(items) - len(playable)
+            suffix = f"(跳过 {skipped} 条不可播内容)" if skipped else ""
+            self.statusBar().showMessage(f"{title} · 共 {len(playable)} 首{suffix}")
+
+        def on_error(message: str) -> None:
+            self.statusBar().showMessage(f"加载收藏夹失败:{message}")
+
+        run_async(fetch, on_done=on_done, on_error=on_error)
+
+    # -- 侧栏 ----------------------------------------------------------------
+
+    def _add_header_item(self, text: str) -> None:
+        item = QListWidgetItem(text, self.sidebar)
+        item.setFlags(Qt.ItemFlag.NoItemFlags)  # 不可选中的分区标题
+
+    def _rebuild_sidebar(self) -> None:
+        self.sidebar.blockSignals(True)
+        self.sidebar.clear()
+        self._add_header_item("网易云 · 歌单")
+        if self._account is None:
+            item = QListWidgetItem("扫码登录", self.sidebar)
+            item.setData(Qt.ItemDataRole.UserRole, ("netease-login", None))
+        else:
+            for playlist in self._playlists:
+                title = playlist.name
+                if playlist.track_count:
+                    title = f"{title}({playlist.track_count})"
+                item = QListWidgetItem(title, self.sidebar)
+                item.setData(
+                    Qt.ItemDataRole.UserRole, ("netease-playlist", playlist.id)
+                )
+            if not self._playlists:
+                self._add_header_item("网易云 · 歌单加载中…")
+
+        self._add_header_item("B站 · 收藏夹")
+        if self._bili_account is None:
+            item = QListWidgetItem("未登录,点击登录", self.sidebar)
+            item.setData(Qt.ItemDataRole.UserRole, ("bili-login", None))
+        else:
+            for folder in self._bili_folders:
+                title = folder.title
+                if folder.count:
+                    title = f"{title}({folder.count})"
+                item = QListWidgetItem(title, self.sidebar)
+                item.setData(Qt.ItemDataRole.UserRole, ("bili-folder", folder.media_id))
+            if not self._bili_folders:
+                self._add_header_item("B站 · 收藏夹加载中…")
+
+        item = QListWidgetItem("设置", self.sidebar)
+        item.setData(Qt.ItemDataRole.UserRole, ("settings", None))
+        self.sidebar.blockSignals(False)
+
+    def _on_sidebar_row_changed(self, row: int) -> None:
+        if row < 0:
+            return
+        item = self.sidebar.item(row)
+        if item is None:
+            return
+        role = item.data(Qt.ItemDataRole.UserRole)
+        kind, payload = role if isinstance(role, tuple) else ("", None)
+        if kind == "settings":
+            self.central_stack.setCurrentIndex(_PAGE_SETTINGS)
+            return
+        if kind == "netease-login":
+            self.central_stack.setCurrentIndex(_PAGE_LOGIN)
+            return
+        if kind == "netease-playlist":
+            self.central_stack.setCurrentIndex(_PAGE_TABLE)
+            self._load_playlist_tracks(int(payload), item.text())
+            return
+        if kind == "bili-folder":
+            self.central_stack.setCurrentIndex(_PAGE_TABLE)
+            self._load_bili_folder_tracks(int(payload), item.text())
+            return
+        if kind == "bili-login":
+            self.central_stack.setCurrentIndex(_PAGE_TABLE)
+            self.song_table.setRowCount(0)
+            self._handle_bili_section_click()
+            return
+        self.central_stack.setCurrentIndex(
+            _PAGE_LOGIN if self._account is None else _PAGE_TABLE
+        )
+
+    # -- 歌曲表 ---------------------------------------------------------------
+
     def _fill_song_table(self) -> None:
+        self.song_table.setHorizontalHeaderLabels(self._table_header)
         self.song_table.setRowCount(len(self._songs))
         for row, song in enumerate(self._songs):
             number = QTableWidgetItem(str(row + 1))
@@ -291,15 +526,39 @@ class MainWindow(QMainWindow):
         )
         self.statusBar().showMessage(f"正在解析播放地址:{song.title}")
 
+        if song.source == "bili":
+            on_done = self._make_bili_play_done(song)
+        else:
+            on_done = self._make_netease_play_done(song)
+
         def resolve() -> tuple[str, object]:
+            if song.source == "bili":
+                try:
+                    stream = self._bili_client.resolve_audio_stream(song.bvid)
+                except BiliAuthRequiredError:
+                    return ("auth", "")
+                except BiliApiError as error:
+                    return ("error", str(error) or error.__class__.__name__)
+                except Exception as error:  # noqa: BLE001 - 边界处统一转消息
+                    return ("error", str(error) or error.__class__.__name__)
+                return ("ok", stream)
             try:
-                playable = self._client.resolve_playable_url(song.id, song.duration_ms)
+                playable = self._client.resolve_playable_url(
+                    song.id, song.duration_ms
+                )
             except NeteaseAuthRequiredError:
                 return ("auth", "")
             except Exception as error:  # noqa: BLE001 - 边界处统一转消息
                 return ("error", str(error) or error.__class__.__name__)
             return ("ok", playable)
 
+        def on_error(message: str) -> None:
+            self._resolving = False
+            self.statusBar().showMessage(f"播放失败:{message}")
+
+        run_async(resolve, on_done=on_done, on_error=on_error)
+
+    def _make_netease_play_done(self, song: _QueueSong):
         def on_done(result) -> None:
             self._resolving = False
             kind, payload = result
@@ -319,11 +578,26 @@ class MainWindow(QMainWindow):
             self.player_bar.set_active(True)
             self.engine.play_url(payload.url)
 
-        def on_error(message: str) -> None:
-            self._resolving = False
-            self.statusBar().showMessage(f"播放失败:{message}")
+        return on_done
 
-        run_async(resolve, on_done=on_done, on_error=on_error)
+    def _make_bili_play_done(self, song: _QueueSong):
+        def on_done(result) -> None:
+            self._resolving = False
+            kind, payload = result
+            if kind == "auth":
+                self._handle_bili_stale_login(
+                    "B站登录态已失效,请点击侧栏「B站 · 收藏夹」重新登录"
+                )
+                return
+            if kind == "error":
+                self.statusBar().showMessage(f"播放失败:{payload}")
+                return
+            self.statusBar().showMessage(f"正在播放:{song.title}")
+            self.player_bar.set_active(True)
+            # B站 m4s 音频流要求 Referer + 浏览器 UA,否则 403
+            self.engine.play_url(payload.url, build_bili_stream_headers())
+
+        return on_done
 
     def _play_next(self) -> None:
         if 0 <= self._current_index < len(self._songs) - 1:
@@ -380,4 +654,5 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001 - 退出路径不抛
                 pass
         self._client.close()
+        self._bili_client.close()
         super().closeEvent(event)

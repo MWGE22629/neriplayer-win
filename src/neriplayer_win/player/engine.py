@@ -32,6 +32,28 @@ class PlayerEngineError(RuntimeError):
     """播放内核初始化/运行错误,携带用户可读的中文指引。"""
 
 
+def build_http_header_fields_option(headers) -> str:
+    """把 HTTP 头字典编译成 loadfile 的逐文件选项串。
+
+    两层解析都要绕开逗号:
+    1. loadfile 的 options 参数本身是 key=value,key=value 列表(逗号分隔),
+       值支持 %<字节长度>% 长度前缀转义(m_option.c read_subparam);
+    2. http-header-fields 又是字符串列表选项(逗号拆项),所以第二个及之后
+       的头必须用 -append 后缀(全值语义,不拆逗号)。
+    实测(mpv v0.41)该形式可携带含逗号的浏览器 UA "(KHTML, like Gecko)"
+    正常取流。
+    """
+    parts: list[str] = []
+    for index, (key, value) in enumerate(headers.items()):
+        entry = f"{key}: {value}"
+        option = "http-header-fields" if index == 0 else "http-header-fields-append"
+        if "," in entry:
+            parts.append(f"{option}=%{len(entry.encode('utf-8'))}%{entry}")
+        else:
+            parts.append(f"{option}={entry}")
+    return ",".join(parts)
+
+
 def _candidate_dll_paths() -> list[Path]:
     here = Path(__file__).resolve()
     repo_root = here.parents[3]
@@ -125,14 +147,27 @@ class PlayerEngine(QObject):
 
     # -- 播放控制 ------------------------------------------------------------
 
-    def play_url(self, url: str) -> None:
-        """加载 URL 并立即播放(切歌 = replace)。"""
+    def play_url(self, url: str, headers: dict[str, str] | None = None) -> None:
+        """加载 URL 并立即播放(切歌 = replace)。
+
+        headers: 逐文件 HTTP 请求头(loadfile 逐文件选项 http-header-fields)。
+        B站音频流(upos mirror 的 m4s)要求 Referer + 浏览器 UA,否则 403;
+        网易云不传 headers,行为不变。
+        """
         self._has_media = True
         self._end_emitted = False
         self._idle_ticks = 0
         self._ever_played = False
         try:
-            self._player.loadfile(url, "replace")
+            if headers:
+                options = build_http_header_fields_option(headers)
+                version = tuple(getattr(self._player, "mpv_version_tuple", (0, 0, 0)))
+                if version >= (0, 38, 0):
+                    self._player.command("loadfile", url, "replace", -1, options)
+                else:
+                    self._player.command("loadfile", url, "replace", options)
+            else:
+                self._player.loadfile(url, "replace")
         except Exception as exc:  # noqa: BLE001 - libmpv 异常统一转错误信号
             self.error.emit(f"加载播放地址失败: {exc}")
             return

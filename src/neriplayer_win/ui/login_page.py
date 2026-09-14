@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
 
 from ..api.netease import NeteaseClient
-from .browser_login import BrowserLoginDialog
+from .browser_login import NETEASE_WEB_LOGIN, BrowserLoginDialog
 
 
 class LoginPage(QWidget):
@@ -66,7 +66,7 @@ class LoginPage(QWidget):
 
     def _open_browser_login(self) -> None:
         self.status_label.setText("等待网页登录完成…")
-        dialog = BrowserLoginDialog(self)
+        dialog = BrowserLoginDialog(NETEASE_WEB_LOGIN, self)
         self._dialog = dialog
         dialog.login_cookie_ready.connect(self._on_cookies)
         dialog.exec()
