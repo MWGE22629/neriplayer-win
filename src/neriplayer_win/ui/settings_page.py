@@ -82,6 +82,7 @@ class SettingsPage(QWidget):
         about_license.setWordWrap(True)
         self.about_link = QLabel(f'<a href="{_UPSTREAM_URL}">上游仓库:{_UPSTREAM_URL}</a>')
         self.about_link.setOpenExternalLinks(True)
+        self.about_link.setObjectName("aboutLink")
         about_layout.addWidget(about_name)
         about_layout.addWidget(about_license)
         about_layout.addWidget(self.about_link)

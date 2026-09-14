@@ -133,6 +133,19 @@ QLabel#trackLabel {
     font-size: 15px;
     color: @onSurface;
 }
+/* 关于页链接:跟随主题主色,亮色下依旧可读 */
+QLabel#aboutLink {
+    color: @primary;
+    font-size: 13px;
+}
+
+/* 侧栏拖动把手(QSplitter) */
+QSplitter::handle {
+    background: transparent;
+}
+QSplitter::handle:hover {
+    background: @outlineVariant;
+}
 
 /* ---- 侧栏(QListWidget 同时服务队列窗口列表) --------------------------- */
 QListWidget {

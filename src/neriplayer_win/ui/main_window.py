@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QStackedWidget,
+    QSplitter,
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
@@ -42,7 +43,7 @@ from ..player.engine import PlayerEngine, PlayerEngineError
 from ..player.queue import BackupUrlRotator, PlayMode, PlayQueue, QueueSong
 from . import theme
 from .browser_login import BILI_WEB_LOGIN, BrowserLoginDialog
-from .icons import app_icon, plain_icon, tinted_icon, tinted_icon_with_color, tray_icon
+from .icons import app_icon, tinted_icon, tinted_icon_with_color, tray_icon
 from .login_page import LoginPage
 from .media_keys import MediaKeyHandler
 from .player_bar import PlayerBar, format_seconds
@@ -183,7 +184,9 @@ class MainWindow(QMainWindow):
 
         # -- 侧栏 -------------------------------------------------------------
         self.sidebar = QListWidget()
-        self.sidebar.setFixedWidth(220)
+        # 宽度可拖动(QSplitter),硬边界兜底;运行期按窗口比例钳制见 _clamp
+        self.sidebar.setMinimumWidth(140)
+        self.sidebar.setMaximumWidth(480)
         self.sidebar.setIconSize(QSize(18, 18))
         self.sidebar.currentRowChanged.connect(self._on_sidebar_row_changed)
 
@@ -211,13 +214,25 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(body)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self.sidebar)
         root = QVBoxLayout()
         root.setContentsMargins(0, 0, 0, 0)
         root.addWidget(self.central_stack, stretch=1)
         root.addWidget(self.player_bar)
-        layout.addLayout(root, stretch=1)
-        self.setCentralWidget(body)
+        # 侧栏宽度可拖动调整,比例钳制在窗口宽度的 1/10 ~ 1/2(_clamp_sidebar_width)
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter.setContentsMargins(0, 0, 0, 0)
+        self._splitter.setHandleWidth(4)
+        self._splitter.addWidget(self.sidebar)
+        self._splitter.addWidget(body)
+        self._splitter.setStretchFactor(0, 0)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setSizes([220, 860])
+        # 拖动把手时同步钳制(隐藏窗口的 resizeEvent 可能延迟到 show 才送达)
+        self._splitter.splitterMoved.connect(
+            lambda *_: self._clamp_sidebar_width()
+        )
+        self.setCentralWidget(self._splitter)
+        self._clamp_sidebar_width()
 
         self.statusBar().showMessage("就绪")
 
@@ -492,16 +507,35 @@ class MainWindow(QMainWindow):
 
     # -- 侧栏 ----------------------------------------------------------------
 
-    def _add_header_item(self, text: str, icon=None) -> None:
+    # 分区头品牌标:未登录跟随主题灰,已登录用柔和品牌色
+    _SOFT_BRAND_COLORS = {"netease": "#E05A5A", "bilibili": "#5AA9E0"}
+
+    def _brand_header_icon(self, source: str):
+        logged_in = (
+            self._account is not None
+            if source == "netease"
+            else self._bili_account is not None
+        )
+        if logged_in:
+            return tinted_icon_with_color(
+                source, QColor(self._SOFT_BRAND_COLORS[source])
+            )
+        return tinted_icon(source)
+
+    def _add_header_item(self, text: str, icon=None, kind: str | None = None) -> None:
         item = QListWidgetItem(text, self.sidebar)
         item.setFlags(Qt.ItemFlag.NoItemFlags)  # 不可选中的分区标题
+        if kind is not None:
+            item.setData(Qt.ItemDataRole.UserRole, (kind, None))
         if icon is not None:
             item.setIcon(icon)
 
     def _rebuild_sidebar(self) -> None:
         self.sidebar.blockSignals(True)
         self.sidebar.clear()
-        self._add_header_item("网易云 · 歌单", plain_icon("netease"))
+        self._add_header_item(
+            "网易云 · 歌单", self._brand_header_icon("netease"), "netease-header"
+        )
         if self._account is None:
             item = QListWidgetItem("扫码登录", self.sidebar)
             item.setData(Qt.ItemDataRole.UserRole, ("netease-login", None))
@@ -515,9 +549,13 @@ class MainWindow(QMainWindow):
                     Qt.ItemDataRole.UserRole, ("netease-playlist", playlist.id)
                 )
             if not self._playlists:
-                self._add_header_item("网易云 · 歌单加载中…")
+                self._add_header_item(
+                    "网易云 · 歌单加载中…", None, "netease-header"
+                )
 
-        self._add_header_item("B站 · 收藏夹", plain_icon("bilibili"))
+        self._add_header_item(
+            "B站 · 收藏夹", self._brand_header_icon("bilibili"), "bili-header"
+        )
         if self._bili_account is None:
             item = QListWidgetItem("未登录,点击登录", self.sidebar)
             item.setData(Qt.ItemDataRole.UserRole, ("bili-login", None))
@@ -529,7 +567,9 @@ class MainWindow(QMainWindow):
                 item = QListWidgetItem(title, self.sidebar)
                 item.setData(Qt.ItemDataRole.UserRole, ("bili-folder", folder.media_id))
             if not self._bili_folders:
-                self._add_header_item("B站 · 收藏夹加载中…")
+                self._add_header_item(
+                    "B站 · 收藏夹加载中…", None, "bili-header"
+                )
 
         item = QListWidgetItem("设置", self.sidebar)
         item.setData(Qt.ItemDataRole.UserRole, ("settings", None))
@@ -544,14 +584,20 @@ class MainWindow(QMainWindow):
         "bili-folder": "queue_music",
     }
 
+    _HEADER_BRAND = {"netease-header": "netease", "bili-header": "bilibili"}
+
     def _apply_sidebar_icons(self) -> None:
-        """按条目类型补单色图标(品牌标在分区标题上,已在 _rebuild_sidebar 设置)。"""
+        """按条目类型补单色图标;分区头品牌标按登录态取色(随主题/登录刷新)。"""
         for row in range(self.sidebar.count()):
             item = self.sidebar.item(row)
             if item is None:
                 continue
             role = item.data(Qt.ItemDataRole.UserRole)
             kind = role[0] if isinstance(role, tuple) else None
+            brand_source = self._HEADER_BRAND.get(kind)
+            if brand_source is not None:
+                item.setIcon(self._brand_header_icon(brand_source))
+                continue
             icon_name = self._SIDEBAR_KIND_ICON.get(kind)
             if icon_name:
                 item.setIcon(tinted_icon(icon_name))
@@ -587,6 +633,23 @@ class MainWindow(QMainWindow):
         self.central_stack.setCurrentIndex(
             _PAGE_LOGIN if self._account is None else _PAGE_TABLE
         )
+
+    # -- 侧栏宽度钳制 ----------------------------------------------------------
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().resizeEvent(event)
+        self._clamp_sidebar_width()
+
+    def _clamp_sidebar_width(self) -> None:
+        """把侧栏宽度限制在窗口宽度的 1/10 ~ 1/2(拖动与窗口缩放都生效)。"""
+        window_width = max(self.width(), 1)
+        lower = max(140, window_width // 10)
+        upper = max(lower + 1, window_width // 2)
+        self.sidebar.setMinimumWidth(lower)
+        self.sidebar.setMaximumWidth(upper)
+        current = self.sidebar.width()
+        if current and (current < lower or current > upper):
+            self._splitter.setSizes([min(max(current, lower), upper), 1])
 
     # -- 歌曲表 ---------------------------------------------------------------
 
