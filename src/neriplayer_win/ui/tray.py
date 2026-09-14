@@ -1,6 +1,7 @@
-"""系统托盘(M3):占位图标 + 右键菜单 + 双击恢复主窗口。
+"""系统托盘(M3):托盘菜单 + 双击恢复主窗口。
 
-图标是运行时画的简单 QPixmap(M4 再换正式应用图标,不引入资产转换);
+图标由 MainWindow 注入(M4 起为 assets/tray_*.png 深浅两版,随主题
+切换;build_placeholder_icon 保留为资产缺失时的运行时回退)。
 菜单含 播放/暂停、上一首、下一首、显示主窗口、退出(始终真退出)。
 """
 
@@ -12,7 +13,7 @@ from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 
 def build_placeholder_icon() -> QIcon:
-    """画一个 32x32 占位图标:圆角底 + 白色播放三角。"""
+    """运行时画的 32x32 占位图标:圆角底 + 白色播放三角(资产缺失时的回退)。"""
     pixmap = QPixmap(32, 32)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
@@ -58,6 +59,10 @@ class TrayController(QObject):
         self.tray.setContextMenu(self._menu)
         self.tray.activated.connect(self._on_activated)
         self.tray.show()
+
+    def set_icon(self, icon: QIcon) -> None:
+        """更换托盘图标(主题切换深/浅版)。"""
+        self.tray.setIcon(icon)
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:

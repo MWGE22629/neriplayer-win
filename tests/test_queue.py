@@ -345,4 +345,5 @@ class TestSettingsStore:
         store = self.make_store(tmp_path, monkeypatch)
         store.save_settings({"close_action": "exit", "play_mode": "sequence", "junk": 1})
         raw = json.loads(store.settings_path.read_text(encoding="utf-8"))
-        assert set(raw) == {"close_action", "play_mode"}
+        # M4 起新增 appearance 键;未知键始终被拒
+        assert set(raw) == {"close_action", "play_mode", "appearance"}

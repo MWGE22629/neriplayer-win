@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -9,6 +9,15 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from .icons import tinted_icon
+
+# 播放模式 -> 图标名(顺序=按列表播 / 随机 / 单曲循环)
+_MODE_ICON = {
+    "sequence": "playlist_play",
+    "shuffle": "shuffle",
+    "repeat_one": "repeat_one",
+}
 
 
 def format_seconds(seconds: float) -> str:
@@ -20,7 +29,9 @@ class PlayerBar(QWidget):
     """底部播放条:两行布局。
 
     第一行:当前时间 + 进度条(可拖 seek,独占整行)+ 总时长;
-    第二行:歌曲信息 + 播放控制 + 音量。
+    第二行:歌曲信息 + 播放控制 + 音量。M4 起控制键均为 SVG 图标
+    (单色随主题染色,见 ui/icons.py),状态经 tooltip / accessibleName
+    暴露给无障碍与测试。
     """
 
     play_pause_clicked = Signal()
@@ -34,19 +45,41 @@ class PlayerBar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._dragging = False
+        self._mode_value = "sequence"
+        self._playing = False
 
         self.track_label = QLabel("未在播放")
+        self.track_label.setObjectName("trackLabel")
 
         self.current_time_label = QLabel("00:00")
         self.total_time_label = QLabel("00:00")
 
-        self.mode_button = QPushButton("顺序")
+        self.mode_button = QPushButton()
         self.mode_button.setToolTip("播放模式:顺序播放")
-        self.prev_button = QPushButton("⏮")
-        self.play_button = QPushButton("▶")
-        self.next_button = QPushButton("⏭")
-        self.queue_button = QPushButton("队列")
+        self.mode_button.setAccessibleName("播放模式")
+        self.prev_button = QPushButton()
+        self.prev_button.setToolTip("上一首")
+        self.prev_button.setAccessibleName("上一首")
+        self.play_button = QPushButton()
+        self.play_button.setObjectName("playButton")
+        self.play_button.setToolTip("播放")
+        self.play_button.setAccessibleName("播放/暂停")
+        self.next_button = QPushButton()
+        self.next_button.setToolTip("下一首")
+        self.next_button.setAccessibleName("下一首")
+        self.queue_button = QPushButton()
         self.queue_button.setToolTip("打开播放队列")
+        self.queue_button.setAccessibleName("播放队列")
+        for button in (self.mode_button, self.prev_button, self.next_button,
+                       self.queue_button):
+            button.setIconSize(QSize(20, 20))
+            button.setFixedSize(36, 36)
+        self.play_button.setIconSize(QSize(22, 22))
+        self.play_button.setFixedSize(44, 44)
+
+        self.volume_icon_label = QLabel()
+        self.volume_icon_label.setFixedSize(20, 20)
+        self.volume_icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.position_slider = QSlider(Qt.Orientation.Horizontal)
         self.position_slider.setRange(0, 0)
@@ -54,6 +87,7 @@ class PlayerBar(QWidget):
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(70)
         self.volume_slider.setFixedWidth(90)
+        self.volume_slider.setToolTip("音量")
 
         progress_row = QHBoxLayout()
         progress_row.setContentsMargins(0, 0, 0, 0)
@@ -63,6 +97,7 @@ class PlayerBar(QWidget):
 
         controls_row = QHBoxLayout()
         controls_row.setContentsMargins(0, 0, 0, 0)
+        controls_row.setSpacing(8)
         controls_row.addWidget(self.track_label)
         controls_row.addStretch(1)
         controls_row.addWidget(self.mode_button)
@@ -71,6 +106,7 @@ class PlayerBar(QWidget):
         controls_row.addWidget(self.next_button)
         controls_row.addStretch(1)
         controls_row.addWidget(self.queue_button)
+        controls_row.addWidget(self.volume_icon_label)
         controls_row.addWidget(self.volume_slider)
 
         layout = QVBoxLayout(self)
@@ -92,18 +128,32 @@ class PlayerBar(QWidget):
             self.position_slider.mousePressEvent
         )
 
+        self._apply_icons()
+
     # -- 对外状态 ------------------------------------------------------------
 
     def set_track(self, title: str) -> None:
         self.track_label.setText(title)
 
-    def set_mode(self, button_label: str, tooltip: str = "") -> None:
-        """更新播放模式按钮(由 MainWindow 在模式变化时调用)。"""
-        self.mode_button.setText(button_label)
-        self.mode_button.setToolTip(tooltip or button_label)
+    def set_mode(self, mode_value: str, display_name: str = "") -> None:
+        """更新播放模式按钮(由 MainWindow 在模式变化时调用)。
+
+        mode_value 为 PlayMode 的枚举值;按钮显示对应图标,
+        display_name 进 tooltip 与 accessibleName。
+        """
+        self._mode_value = mode_value
+        name = display_name or mode_value
+        self.mode_button.setToolTip(f"播放模式:{name}")
+        self.mode_button.setAccessibleName(f"播放模式:{name}")
+        self.mode_button.setIcon(tinted_icon(_MODE_ICON.get(mode_value, "playlist_play"), "primary"))
 
     def set_playing(self, playing: bool) -> None:
-        self.play_button.setText("⏸" if playing else "▶")
+        """播放状态切换:按钮图标 播放三角 <-> 暂停双竖线。"""
+        self._playing = playing
+        self.play_button.setIcon(
+            tinted_icon("pause" if playing else "play", "onPrimaryContainer")
+        )
+        self.play_button.setToolTip("暂停" if playing else "播放")
 
     def set_progress(self, position_s: float, duration_s: float) -> None:
         self.current_time_label.setText(format_seconds(position_s))
@@ -127,6 +177,24 @@ class PlayerBar(QWidget):
         ):
             control.setEnabled(active)
         self.volume_slider.setEnabled(True)
+
+    def retheme(self) -> None:
+        """主题切换后重取染色图标(icons 缓存已由 ThemeManager 清空)。"""
+        self._apply_icons()
+
+    # -- 图标 ----------------------------------------------------------------
+
+    def _apply_icons(self) -> None:
+        self.prev_button.setIcon(tinted_icon("skip_previous"))
+        self.next_button.setIcon(tinted_icon("skip_next"))
+        self.queue_button.setIcon(tinted_icon("queue_music"))
+        self.mode_button.setIcon(
+            tinted_icon(_MODE_ICON.get(self._mode_value, "playlist_play"), "primary")
+        )
+        self.set_playing(self._playing)  # 复用:按当前状态取播放/暂停图标
+        self.volume_icon_label.setPixmap(
+            tinted_icon("volume_up").pixmap(QSize(18, 18))
+        )
 
     # -- 进度拖动 ------------------------------------------------------------
 

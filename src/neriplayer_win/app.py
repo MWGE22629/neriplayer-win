@@ -17,6 +17,7 @@ if sys.platform == "win32":
 from PySide6.QtCore import QLoggingCategory
 from PySide6.QtWidgets import QApplication
 
+from .ui.icons import app_icon
 from .ui.main_window import MainWindow
 
 # 静音 qt.qpa.fonts 的 Fixedsys 告警:QtWebEngine 请求等宽字体回退时会
@@ -30,6 +31,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("NeriPlayer Win")
     app.setOrganizationName("NeriPlayer Win")
+    app.setWindowIcon(app_icon())  # 全部窗口/托盘默认图标(M4)
     window = MainWindow()
     window.show()
     return app.exec()

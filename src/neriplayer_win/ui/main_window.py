@@ -3,11 +3,13 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QHeaderView,
+    QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -35,16 +37,19 @@ from ..api.netease import (
     NeteasePlaylist,
     NeteaseSong,
 )
-from ..data.store import LocalStore
+from ..data.store import SETTING_APPEARANCE, LocalStore
 from ..player.engine import PlayerEngine, PlayerEngineError
 from ..player.queue import BackupUrlRotator, PlayMode, PlayQueue, QueueSong
+from . import theme
 from .browser_login import BILI_WEB_LOGIN, BrowserLoginDialog
+from .icons import app_icon, plain_icon, tinted_icon, tinted_icon_with_color, tray_icon
 from .login_page import LoginPage
 from .media_keys import MediaKeyHandler
 from .player_bar import PlayerBar, format_seconds
 from .queue_window import QueueWindow
 from .settings_page import SettingsPage
-from .tray import TrayController, build_placeholder_icon
+from .theme import ThemeManager
+from .tray import TrayController
 from .workers import run_async
 
 _PAGE_LOGIN = 0
@@ -78,6 +83,36 @@ class _ActivePlay:
     song: QueueSong
     rotator: BackupUrlRotator
     headers: dict[str, str] | None
+
+
+class _EmptyStateView(QWidget):
+    """歌曲表空态:居中淡色图标 + 一行提示(docs/UI_ASSETS.md C5,不引插画)。"""
+
+    def __init__(self, icon_name: str = "library_music", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._icon_name = icon_name
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(48, 48)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.hint_label = QLabel("")
+        self.hint_label.setObjectName("emptyHint")
+        self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout = QVBoxLayout(self)
+        layout.addStretch(1)
+        layout.addWidget(self.icon_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(self.hint_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        layout.addStretch(1)
+        self.retheme()
+
+    def set_hint(self, text: str) -> None:
+        self.hint_label.setText(text)
+
+    def retheme(self) -> None:
+        color = QColor(theme.current_palette()["onSurfaceVariant"])
+        color.setAlpha(120)  # 淡色:约半透明
+        self.icon_label.setPixmap(
+            tinted_icon_with_color(self._icon_name, color).pixmap(QSize(48, 48))
+        )
 
 
 class MainWindow(QMainWindow):
@@ -132,26 +167,45 @@ class MainWindow(QMainWindow):
         self.song_table.setAlternatingRowColors(True)
         self.song_table.cellDoubleClicked.connect(self._on_cell_double_clicked)
 
+        # 空态视图与歌曲表同页切换:表空显示居中提示,有内容显示表
+        self._empty_state = _EmptyStateView()
+        self.table_stack = QStackedWidget()
+        self.table_stack.addWidget(self.song_table)  # 0
+        self.table_stack.addWidget(self._empty_state)  # 1
+
         self.settings_page = SettingsPage()
         self._wire_settings_page()
 
         self.central_stack = QStackedWidget()
         self.central_stack.addWidget(self.login_page)  # 0
-        self.central_stack.addWidget(self.song_table)  # 1
+        self.central_stack.addWidget(self.table_stack)  # 1
         self.central_stack.addWidget(self.settings_page)  # 2
 
         # -- 侧栏 -------------------------------------------------------------
         self.sidebar = QListWidget()
         self.sidebar.setFixedWidth(220)
+        self.sidebar.setIconSize(QSize(18, 18))
         self.sidebar.currentRowChanged.connect(self._on_sidebar_row_changed)
 
         # -- 底部播放条 -------------------------------------------------------
         self.player_bar = PlayerBar()
+        self.player_bar.setObjectName("playerBar")
         self.player_bar.set_active(False)
         if self.engine is not None:
             self._wire_engine()
         self._wire_player_bar()
         self._wire_queue()
+
+        # -- 主题(M4):应用持久化主题;此后切换经 theme_changed 全量刷新 -----
+        # 注意:_on_theme_changed 会触碰 _tray 等属性,须先完成初始化
+        self._queue_window: QueueWindow | None = None
+        self._tray: TrayController | None = None
+        self._tray_hint_shown = False
+        self._force_exit = False
+        self._media_keys: MediaKeyHandler | None = None
+        self.themes = ThemeManager()
+        self.themes.theme_changed.connect(self._on_theme_changed)
+        self.themes.apply(self._settings.get(SETTING_APPEARANCE, "dark"))
 
         body = QWidget()
         layout = QHBoxLayout(body)
@@ -168,17 +222,12 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("就绪")
 
         # -- 托盘 / 媒体键 / 队列窗口 ------------------------------------------
-        self._queue_window: QueueWindow | None = None
-        self._tray: TrayController | None = None
-        self._tray_hint_shown = False
-        self._force_exit = False
-        self._media_keys: MediaKeyHandler | None = None
-        app_icon = build_placeholder_icon()
-        self.setWindowIcon(app_icon)
-        self._setup_tray(app_icon)
+        self.setWindowIcon(app_icon())
+        self._setup_tray(tray_icon(self.themes.name))
         self._setup_media_keys()
 
         self._rebuild_sidebar()
+        self._update_table_empty_state()
         self.central_stack.setCurrentIndex(_PAGE_LOGIN)
         self.login_page.start()
         self._boot_from_store()
@@ -253,6 +302,7 @@ class MainWindow(QMainWindow):
         self._rebuild_sidebar()
         self.central_stack.setCurrentIndex(_PAGE_TABLE)
         self.song_table.setRowCount(0)
+        self._update_table_empty_state()
         self._queue.replace([])
         self._load_playlists()
 
@@ -362,6 +412,7 @@ class MainWindow(QMainWindow):
 
     def _load_playlist_tracks(self, playlist_id: int, title: str) -> None:
         self.song_table.setRowCount(0)
+        self._update_table_empty_state()
         self.statusBar().showMessage(f"正在加载:{title}")
 
         def fetch() -> object:
@@ -408,6 +459,7 @@ class MainWindow(QMainWindow):
 
     def _load_bili_folder_tracks(self, media_id: int, title: str) -> None:
         self.song_table.setRowCount(0)
+        self._update_table_empty_state()
         self.statusBar().showMessage(f"正在加载:{title}")
 
         def fetch() -> object:
@@ -440,14 +492,16 @@ class MainWindow(QMainWindow):
 
     # -- 侧栏 ----------------------------------------------------------------
 
-    def _add_header_item(self, text: str) -> None:
+    def _add_header_item(self, text: str, icon=None) -> None:
         item = QListWidgetItem(text, self.sidebar)
         item.setFlags(Qt.ItemFlag.NoItemFlags)  # 不可选中的分区标题
+        if icon is not None:
+            item.setIcon(icon)
 
     def _rebuild_sidebar(self) -> None:
         self.sidebar.blockSignals(True)
         self.sidebar.clear()
-        self._add_header_item("网易云 · 歌单")
+        self._add_header_item("网易云 · 歌单", plain_icon("netease"))
         if self._account is None:
             item = QListWidgetItem("扫码登录", self.sidebar)
             item.setData(Qt.ItemDataRole.UserRole, ("netease-login", None))
@@ -463,7 +517,7 @@ class MainWindow(QMainWindow):
             if not self._playlists:
                 self._add_header_item("网易云 · 歌单加载中…")
 
-        self._add_header_item("B站 · 收藏夹")
+        self._add_header_item("B站 · 收藏夹", plain_icon("bilibili"))
         if self._bili_account is None:
             item = QListWidgetItem("未登录,点击登录", self.sidebar)
             item.setData(Qt.ItemDataRole.UserRole, ("bili-login", None))
@@ -480,6 +534,27 @@ class MainWindow(QMainWindow):
         item = QListWidgetItem("设置", self.sidebar)
         item.setData(Qt.ItemDataRole.UserRole, ("settings", None))
         self.sidebar.blockSignals(False)
+        self._apply_sidebar_icons()
+
+    _SIDEBAR_KIND_ICON = {
+        "settings": "settings",
+        "netease-login": "search",
+        "netease-playlist": "library_music",
+        "bili-login": "person",
+        "bili-folder": "queue_music",
+    }
+
+    def _apply_sidebar_icons(self) -> None:
+        """按条目类型补单色图标(品牌标在分区标题上,已在 _rebuild_sidebar 设置)。"""
+        for row in range(self.sidebar.count()):
+            item = self.sidebar.item(row)
+            if item is None:
+                continue
+            role = item.data(Qt.ItemDataRole.UserRole)
+            kind = role[0] if isinstance(role, tuple) else None
+            icon_name = self._SIDEBAR_KIND_ICON.get(kind)
+            if icon_name:
+                item.setIcon(tinted_icon(icon_name))
 
     def _on_sidebar_row_changed(self, row: int) -> None:
         if row < 0:
@@ -506,6 +581,7 @@ class MainWindow(QMainWindow):
         if kind == "bili-login":
             self.central_stack.setCurrentIndex(_PAGE_TABLE)
             self.song_table.setRowCount(0)
+            self._update_table_empty_state()
             self._handle_bili_section_click()
             return
         self.central_stack.setCurrentIndex(
@@ -513,6 +589,16 @@ class MainWindow(QMainWindow):
         )
 
     # -- 歌曲表 ---------------------------------------------------------------
+
+    def _update_table_empty_state(self) -> None:
+        """表空时切到空态视图;文案按登录状态区分。"""
+        empty = self.song_table.rowCount() == 0
+        self.table_stack.setCurrentIndex(1 if empty else 0)
+        if empty:
+            if self._account is None and self._bili_account is None:
+                self._empty_state.set_hint("登录网易云或B站后,这里会展示你的歌单与收藏夹")
+            else:
+                self._empty_state.set_hint("从左侧选择歌单或收藏夹,双击即可播放")
 
     def _fill_song_table(self) -> None:
         songs = self._queue.items()
@@ -530,6 +616,7 @@ class MainWindow(QMainWindow):
                 format_seconds(song.duration_ms / 1000) if song.duration_ms else "--:--"
             )
             self.song_table.setItem(row, 3, QTableWidgetItem(duration))
+        self._update_table_empty_state()
 
     # -- 播放 ----------------------------------------------------------------
 
@@ -708,7 +795,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"播放模式:{mode.display_name}")
 
     def _on_queue_mode_changed(self, mode) -> None:
-        self.player_bar.set_mode(mode.button_label, mode.display_name)
+        self.player_bar.set_mode(mode.value, mode.display_name)
 
     def _on_settings_play_mode(self, value: str) -> None:
         try:
@@ -721,12 +808,30 @@ class MainWindow(QMainWindow):
         self._settings["close_action"] = action
         self._store.save_settings(self._settings)
 
+    def _on_settings_appearance(self, value: str) -> None:
+        """设置页外观选择:持久化并即时切换主题。"""
+        if value not in theme.VALID_THEMES:
+            return
+        self._settings[SETTING_APPEARANCE] = value
+        self._store.save_settings(self._settings)
+        self.themes.apply(value)
+
+    def _on_theme_changed(self, name: str) -> None:
+        """主题切换的全量资源刷新(ThemeManager 已换全局 QSS)。"""
+        self.player_bar.retheme()
+        self._empty_state.retheme()
+        self._apply_sidebar_icons()
+        if self._tray is not None:
+            self._tray.set_icon(tray_icon(name))
+
     def _wire_settings_page(self) -> None:
         page = self.settings_page
         page.close_action_changed.connect(self._on_settings_close_action)
         page.play_mode_changed.connect(self._on_settings_play_mode)
+        page.appearance_changed.connect(self._on_settings_appearance)
         page.set_close_action(self._settings.get("close_action", "tray"))
         page.set_play_mode(self._settings.get("play_mode", "sequence"))
+        page.set_appearance(self._settings.get(SETTING_APPEARANCE, "dark"))
 
     # -- 队列窗口 --------------------------------------------------------------
 
@@ -740,7 +845,7 @@ class MainWindow(QMainWindow):
 
     def _wire_queue(self) -> None:
         mode = self._queue.mode()
-        self.player_bar.set_mode(mode.button_label, mode.display_name)
+        self.player_bar.set_mode(mode.value, mode.display_name)
         self._queue.mode_changed.connect(self._on_queue_mode_changed)
 
     # -- 信号接线 ------------------------------------------------------------

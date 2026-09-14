@@ -30,12 +30,16 @@ _SETTINGS_FILE = "settings.json"
 # M3 设置项:关闭行为与默认播放模式。
 # close_action 默认 "tray"(最小化到托盘,符合播放器习惯);"exit" 直接退出。
 # play_mode 对应 player.queue.PlayMode 的枚举值。
+# M4 增加 appearance:外观主题("dark" 暗色 / "light" 亮色),默认 dark。
 SETTING_CLOSE_ACTION = "close_action"
 SETTING_PLAY_MODE = "play_mode"
+SETTING_APPEARANCE = "appearance"
 DEFAULT_CLOSE_ACTION = "tray"
 DEFAULT_PLAY_MODE = "sequence"
+DEFAULT_APPEARANCE = "dark"
 _VALID_CLOSE_ACTIONS = ("exit", "tray")
 _VALID_PLAY_MODES = ("sequence", "shuffle", "repeat_one")
+_VALID_APPEARANCES = ("dark", "light")
 
 
 def default_settings() -> dict[str, Any]:
@@ -43,6 +47,7 @@ def default_settings() -> dict[str, Any]:
     return {
         SETTING_CLOSE_ACTION: DEFAULT_CLOSE_ACTION,
         SETTING_PLAY_MODE: DEFAULT_PLAY_MODE,
+        SETTING_APPEARANCE: DEFAULT_APPEARANCE,
     }
 
 _COOKIE_NAME_REGEX = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
@@ -241,6 +246,8 @@ class LocalStore:
             merged[SETTING_CLOSE_ACTION] = data[SETTING_CLOSE_ACTION]
         if data.get(SETTING_PLAY_MODE) in _VALID_PLAY_MODES:
             merged[SETTING_PLAY_MODE] = data[SETTING_PLAY_MODE]
+        if data.get(SETTING_APPEARANCE) in _VALID_APPEARANCES:
+            merged[SETTING_APPEARANCE] = data[SETTING_APPEARANCE]
         return merged
 
     def save_settings(self, settings: Mapping[str, Any]) -> bool:
@@ -250,6 +257,8 @@ class LocalStore:
             merged[SETTING_CLOSE_ACTION] = settings[SETTING_CLOSE_ACTION]
         if settings.get(SETTING_PLAY_MODE) in _VALID_PLAY_MODES:
             merged[SETTING_PLAY_MODE] = settings[SETTING_PLAY_MODE]
+        if settings.get(SETTING_APPEARANCE) in _VALID_APPEARANCES:
+            merged[SETTING_APPEARANCE] = settings[SETTING_APPEARANCE]
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
             self._settings_path.write_text(

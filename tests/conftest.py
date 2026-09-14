@@ -15,6 +15,15 @@ import sys
 import pytest
 
 
+@pytest.fixture(scope="session")
+def qapp():
+    """进程内共享的 QApplication(UI 层测试用;沿用已存在的实例)。"""
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_sessionfinish(session, exitstatus):
     yield

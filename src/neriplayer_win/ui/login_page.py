@@ -26,6 +26,7 @@ class LoginPage(QWidget):
         self._dialog: BrowserLoginDialog | None = None
 
         title = QLabel("登录网易云音乐")
+        title.setObjectName("pageTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         font = title.font()
         font.setPointSize(16)
@@ -38,6 +39,7 @@ class LoginPage(QWidget):
         self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.login_button = QPushButton("打开网页登录")
+        self.login_button.setObjectName("primaryButton")
         self.login_button.clicked.connect(self._open_browser_login)
 
         self.status_label = QLabel("")

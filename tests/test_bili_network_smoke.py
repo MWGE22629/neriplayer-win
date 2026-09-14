@@ -100,13 +100,17 @@ def test_resolve_public_audio_stream_smoke():
         assert stream.bitrate_kbps >= 0
 
         headers = build_bili_stream_headers()
-        with httpx.Client(
-            timeout=httpx.Timeout(connect=8.0, read=12.0, write=12.0, pool=8.0),
-            follow_redirects=True,
-        ) as http:
-            response = http.get(
-                stream.url, headers={**headers, "Range": "bytes=0-1023"}
-            )
+        try:
+            with httpx.Client(
+                timeout=httpx.Timeout(connect=8.0, read=12.0, write=12.0, pool=8.0),
+                follow_redirects=True,
+            ) as http:
+                response = http.get(
+                    stream.url, headers={**headers, "Range": "bytes=0-1023"}
+                )
+        except httpx.TransportError as error:
+            # API 可达但 CDN 直连超时/被墙:按本文件「离线自动 skip」约定跳过
+            pytest.skip(f"CDN 直连不可达,跳过取流冒烟: {error}")
         assert response.status_code in (200, 206)
         assert len(response.content) >= 1
     finally:
@@ -130,6 +134,17 @@ def test_engine_plays_bili_stream_with_headers(qapp, engine, tmp_path):
         stream = client.resolve_audio_stream(bvid)
     finally:
         client.close()
+
+    # CDN 直连探测:拉不到前 1KB 时 libmpv 同样无法加载,按离线 skip
+    headers = build_bili_stream_headers()
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(connect=8.0, read=12.0, write=12.0, pool=8.0),
+            follow_redirects=True,
+        ) as http:
+            http.get(stream.url, headers={**headers, "Range": "bytes=0-1023"})
+    except httpx.TransportError as error:
+        pytest.skip(f"CDN 直连不可达,跳过播放冒烟: {error}")
 
     errors: list[str] = []
     positions: list[float] = []

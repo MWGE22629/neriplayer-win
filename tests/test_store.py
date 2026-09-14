@@ -133,3 +133,39 @@ class TestLocalStoreBili:
         store.clear_bili()
         assert store.load_bili() is None
         assert store.load_netease() is not None
+
+
+class TestLocalStoreSettings:
+    def test_defaults(self, tmp_path, monkeypatch):
+        store = make_store(tmp_path, monkeypatch)
+        settings = store.load_settings()
+        assert settings["close_action"] == "tray"
+        assert settings["play_mode"] == "sequence"
+        assert settings["appearance"] == "dark"
+
+    def test_appearance_roundtrip(self, tmp_path, monkeypatch):
+        store = make_store(tmp_path, monkeypatch)
+        assert store.save_settings({"appearance": "light"}) is True
+        assert store.load_settings()["appearance"] == "light"
+        assert store.save_settings({"appearance": "dark"}) is True
+        assert store.load_settings()["appearance"] == "dark"
+
+    def test_invalid_appearance_falls_back(self, tmp_path, monkeypatch):
+        store = make_store(tmp_path, monkeypatch)
+        store.settings_path.parent.mkdir(parents=True, exist_ok=True)
+        store.settings_path.write_text(
+            json.dumps({"appearance": "solarized"}), encoding="utf-8"
+        )
+        assert store.load_settings()["appearance"] == "dark"
+        # 保存时非法值同样被拒,保持默认
+        assert store.save_settings({"appearance": "neo"}) is True
+        assert store.load_settings()["appearance"] == "dark"
+
+    def test_other_settings_survive_appearance_save(self, tmp_path, monkeypatch):
+        store = make_store(tmp_path, monkeypatch)
+        store.save_settings({"appearance": "light", "play_mode": "shuffle"})
+        assert store.load_settings() == {
+            "close_action": "tray",
+            "play_mode": "shuffle",
+            "appearance": "light",
+        }

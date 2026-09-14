@@ -1,0 +1,10 @@
+<!--
+  Mechanical conversion from Android drawable vector XML:
+  reference/NeriPlayer-Android/app/src/main/res/drawable/round_skip_previous_24.xml
+  Upstream: NeriPlayer (GPL-3.0), https://github.com/cwuom/NeriPlayer
+  Rules: viewportWidth/Height -> viewBox, pathData -> d,
+         fillColor -> fill, android:tint dropped.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <path d="M7,6c0.55,0 1,0.45 1,1v10c0,0.55 -0.45,1 -1,1s-1,-0.45 -1,-1L6,7c0,-0.55 0.45,-1 1,-1zM10.66,12.82l5.77,4.07c0.66,0.47 1.58,-0.01 1.58,-0.82L18.01,7.93c0,-0.81 -0.91,-1.28 -1.58,-0.82l-5.77,4.07c-0.57,0.4 -0.57,1.24 0,1.64z" fill="#FFFFFF"/>
+</svg>
