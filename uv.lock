@@ -115,6 +115,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "nuitka" },
     { name = "pytest" },
 ]
 
@@ -128,7 +129,16 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=9.1.1" }]
+dev = [
+    { name = "nuitka", specifier = ">=4.2.1" },
+    { name = "pytest", specifier = ">=9.1.1" },
+]
+
+[[package]]
+name = "nuitka"
+version = "4.2.1"
+source = { registry = "https://mirrors.cloud.tencent.com/pypi/simple" }
+sdist = { url = "https://mirrors.cloud.tencent.com/pypi/packages/c7/ce/38409fc853cc26d86ab71ccd53f7dfddbc7a84d4821b9b54db428b35779b/nuitka-4.2.1.tar.gz", hash = "sha256:815c6e571a7a6424af384fe9d95d4ba38f1634d39a5515e8094d7fbfa090cbcb" }
 
 [[package]]
 name = "packaging"

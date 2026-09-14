@@ -13,6 +13,12 @@ dist/
 .mypy_cache/
 .ruff_cache/
 
+# Nuitka 打包中间物(工具链固定 --output-dir=build,此处兜底)
+*.build/
+*.dist/
+*.onefile-build/
+*.bin/
+
 # IDE / OS
 .idea/
 .vscode/

@@ -29,6 +29,7 @@ where = ["src"]
 
 [dependency-groups]
 dev = [
+    "nuitka>=4.2.1",
     "pytest>=9.1.1",
 ]
 

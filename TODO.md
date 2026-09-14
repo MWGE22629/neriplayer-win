@@ -39,8 +39,8 @@ Windows 桌面音乐播放器,自用优先:网易云 + B站两个音源,
       后台亦生效;被占用时回退 WM_APPCOMMAND 前台方案)
 
 ### M4 · 打磨与发布(达到「上线标准」时)
-- [ ] 打包为独立 exe:免装 Python / mpv 即可运行
-- [ ] 性能验收:冷启动 ≤ 1.5s,常驻内存 ≤ 150MB 量级
+- [x] 打包为独立 exe:免装 Python / mpv 即可运行(Nuitka 单目录,tools/build_exe.py)
+- [x] 性能验收:冷启动 ≤ 1.5s,常驻内存 ≤ 150MB 量级(实测 530ms / 141MB,docs/PERF.md)
 - [ ] 网络/登录/播放失败的友好提示,不裸崩
 - [ ] 应用图标与 About;GPL-3.0 合规标注(衍生自 NeriPlayer)
 
