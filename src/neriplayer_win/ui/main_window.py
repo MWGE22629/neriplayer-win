@@ -218,6 +218,7 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.addWidget(self.central_stack, stretch=1)
         root.addWidget(self.player_bar)
+        layout.addLayout(root, stretch=1)  # 右列挂进 body(遗漏此行=中央区/播放条消失)
         # 侧栏宽度可拖动调整,比例钳制在窗口宽度的 1/10 ~ 1/2(_clamp_sidebar_width)
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.setContentsMargins(0, 0, 0, 0)
