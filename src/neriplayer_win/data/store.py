@@ -20,11 +20,30 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 _DATA_DIR_ENV = "NERIPLAYER_WIN_DATA_DIR"
 _NETEASE_FILE = "netease.json"
 _BILI_FILE = "bili.json"
+_SETTINGS_FILE = "settings.json"
+
+# M3 设置项:关闭行为与默认播放模式。
+# close_action 默认 "tray"(最小化到托盘,符合播放器习惯);"exit" 直接退出。
+# play_mode 对应 player.queue.PlayMode 的枚举值。
+SETTING_CLOSE_ACTION = "close_action"
+SETTING_PLAY_MODE = "play_mode"
+DEFAULT_CLOSE_ACTION = "tray"
+DEFAULT_PLAY_MODE = "sequence"
+_VALID_CLOSE_ACTIONS = ("exit", "tray")
+_VALID_PLAY_MODES = ("sequence", "shuffle", "repeat_one")
+
+
+def default_settings() -> dict[str, Any]:
+    """设置的出厂默认值(副本)。"""
+    return {
+        SETTING_CLOSE_ACTION: DEFAULT_CLOSE_ACTION,
+        SETTING_PLAY_MODE: DEFAULT_PLAY_MODE,
+    }
 
 _COOKIE_NAME_REGEX = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _LOGIN_COOKIE_KEYS = ("MUSIC_U",)
@@ -77,6 +96,7 @@ class LocalStore:
         self._dir = Path(data_dir) if data_dir is not None else default_data_dir()
         self._netease_path = self._dir / _NETEASE_FILE
         self._bili_path = self._dir / _BILI_FILE
+        self._settings_path = self._dir / _SETTINGS_FILE
 
     @property
     def netease_path(self) -> Path:
@@ -85,6 +105,10 @@ class LocalStore:
     @property
     def bili_path(self) -> Path:
         return self._bili_path
+
+    @property
+    def settings_path(self) -> Path:
+        return self._settings_path
 
     # -- 网易云登录态 ---------------------------------------------------------
 
@@ -200,3 +224,37 @@ class LocalStore:
             self._bili_path.unlink()
         except OSError:
             pass
+
+    # -- 应用设置(M3) ----------------------------------------------------------
+
+    def load_settings(self) -> dict[str, Any]:
+        """读取 settings.json;无文件/损坏/非法值时回落默认,结果恒为合法。"""
+        merged = default_settings()
+        try:
+            raw = self._settings_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except (OSError, json.JSONDecodeError):
+            return merged
+        if not isinstance(data, dict):
+            return merged
+        if data.get(SETTING_CLOSE_ACTION) in _VALID_CLOSE_ACTIONS:
+            merged[SETTING_CLOSE_ACTION] = data[SETTING_CLOSE_ACTION]
+        if data.get(SETTING_PLAY_MODE) in _VALID_PLAY_MODES:
+            merged[SETTING_PLAY_MODE] = data[SETTING_PLAY_MODE]
+        return merged
+
+    def save_settings(self, settings: Mapping[str, Any]) -> bool:
+        """写盘(已知键取合法值,未知键忽略);IO 失败返回 False。"""
+        merged = default_settings()
+        if settings.get(SETTING_CLOSE_ACTION) in _VALID_CLOSE_ACTIONS:
+            merged[SETTING_CLOSE_ACTION] = settings[SETTING_CLOSE_ACTION]
+        if settings.get(SETTING_PLAY_MODE) in _VALID_PLAY_MODES:
+            merged[SETTING_PLAY_MODE] = settings[SETTING_PLAY_MODE]
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+            self._settings_path.write_text(
+                json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError:
+            return False
+        return True

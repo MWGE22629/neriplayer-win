@@ -103,6 +103,9 @@ class PlayerEngine(QObject):
     track_ended = Signal()  # 一首播完(eof)
     playing_changed = Signal(bool)
     error = Signal(str)
+    # 加载失败类错误(play_url 抛错 / 加载宽限期超时):与通用 error 分开,
+    # 供上层做备用 URL 轮换(B站 backupUrls)后重试
+    load_failed = Signal(str)
 
     _LOAD_FAIL_GRACE_TICKS = 20  # ~5s,冷启动慢加载不算失败
 
@@ -169,7 +172,7 @@ class PlayerEngine(QObject):
             else:
                 self._player.loadfile(url, "replace")
         except Exception as exc:  # noqa: BLE001 - libmpv 异常统一转错误信号
-            self.error.emit(f"加载播放地址失败: {exc}")
+            self.load_failed.emit(f"加载播放地址失败: {exc}")
             return
         self.playing_changed.emit(True)
         self._timer.start()
@@ -294,7 +297,7 @@ class PlayerEngine(QObject):
                 if self._idle_ticks >= self._LOAD_FAIL_GRACE_TICKS:
                     self._end_emitted = True
                     self.playing_changed.emit(False)
-                    self.error.emit(
+                    self.load_failed.emit(
                         "播放失败:无法加载该音频流(链接可能已过期或无音轨)"
                     )
         else:

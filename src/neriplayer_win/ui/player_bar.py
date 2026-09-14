@@ -28,6 +28,8 @@ class PlayerBar(QWidget):
     next_clicked = Signal()
     seek_requested = Signal(float)  # 秒
     volume_changed = Signal(int)  # 0-100
+    mode_clicked = Signal()  # 循环播放模式按钮
+    queue_clicked = Signal()  # 打开播放队列窗口
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -38,9 +40,13 @@ class PlayerBar(QWidget):
         self.current_time_label = QLabel("00:00")
         self.total_time_label = QLabel("00:00")
 
+        self.mode_button = QPushButton("顺序")
+        self.mode_button.setToolTip("播放模式:顺序播放")
         self.prev_button = QPushButton("⏮")
         self.play_button = QPushButton("▶")
         self.next_button = QPushButton("⏭")
+        self.queue_button = QPushButton("队列")
+        self.queue_button.setToolTip("打开播放队列")
 
         self.position_slider = QSlider(Qt.Orientation.Horizontal)
         self.position_slider.setRange(0, 0)
@@ -59,10 +65,12 @@ class PlayerBar(QWidget):
         controls_row.setContentsMargins(0, 0, 0, 0)
         controls_row.addWidget(self.track_label)
         controls_row.addStretch(1)
+        controls_row.addWidget(self.mode_button)
         controls_row.addWidget(self.prev_button)
         controls_row.addWidget(self.play_button)
         controls_row.addWidget(self.next_button)
         controls_row.addStretch(1)
+        controls_row.addWidget(self.queue_button)
         controls_row.addWidget(self.volume_slider)
 
         layout = QVBoxLayout(self)
@@ -73,6 +81,8 @@ class PlayerBar(QWidget):
         self.play_button.clicked.connect(self.play_pause_clicked.emit)
         self.prev_button.clicked.connect(self.prev_clicked.emit)
         self.next_button.clicked.connect(self.next_clicked.emit)
+        self.mode_button.clicked.connect(self.mode_clicked.emit)
+        self.queue_button.clicked.connect(self.queue_clicked.emit)
         self.volume_slider.valueChanged.connect(self.volume_changed.emit)
 
         self.position_slider.sliderPressed.connect(self._on_slider_pressed)
@@ -86,6 +96,11 @@ class PlayerBar(QWidget):
 
     def set_track(self, title: str) -> None:
         self.track_label.setText(title)
+
+    def set_mode(self, button_label: str, tooltip: str = "") -> None:
+        """更新播放模式按钮(由 MainWindow 在模式变化时调用)。"""
+        self.mode_button.setText(button_label)
+        self.mode_button.setToolTip(tooltip or button_label)
 
     def set_playing(self, playing: bool) -> None:
         self.play_button.setText("⏸" if playing else "▶")

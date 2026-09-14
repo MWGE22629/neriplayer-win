@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QHeaderView,
-    QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QStackedWidget,
+    QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -35,9 +37,14 @@ from ..api.netease import (
 )
 from ..data.store import LocalStore
 from ..player.engine import PlayerEngine, PlayerEngineError
+from ..player.queue import BackupUrlRotator, PlayMode, PlayQueue, QueueSong
 from .browser_login import BILI_WEB_LOGIN, BrowserLoginDialog
 from .login_page import LoginPage
+from .media_keys import MediaKeyHandler
 from .player_bar import PlayerBar, format_seconds
+from .queue_window import QueueWindow
+from .settings_page import SettingsPage
+from .tray import TrayController, build_placeholder_icon
 from .workers import run_async
 
 _PAGE_LOGIN = 0
@@ -47,38 +54,39 @@ _PAGE_SETTINGS = 2
 _HEADER_NETEASE = ["#", "标题", "歌手", "时长"]
 _HEADER_BILI = ["#", "标题", "UP主", "时长"]
 
-
-@dataclass(frozen=True)
-class _QueueSong:
-    """统一队列条目:网易云歌曲与B站视频(收藏夹条目)同构。"""
-
-    source: str  # "netease" | "bili"
-    id: int  # 网易云 song id / B站 avid
-    bvid: str  # B站 only
-    title: str
-    artist: str  # 歌手 / UP主
-    duration_ms: int
+_MODE_CYCLE = (PlayMode.SEQUENCE, PlayMode.SHUFFLE, PlayMode.REPEAT_ONE)
 
 
-def _netease_song_to_queue(song: NeteaseSong) -> _QueueSong:
-    return _QueueSong(
+def _netease_song_to_queue(song: NeteaseSong) -> QueueSong:
+    return QueueSong(
         source="netease", id=song.id, bvid="", title=song.title,
         artist=song.artist, duration_ms=song.duration_ms,
     )
 
 
-def _bili_item_to_queue(avid: int, bvid: str, title: str, upper: str, duration_sec: int) -> _QueueSong:
-    return _QueueSong(
+def _bili_item_to_queue(avid: int, bvid: str, title: str, upper: str, duration_sec: int) -> QueueSong:
+    return QueueSong(
         source="bili", id=avid, bvid=bvid, title=title,
         artist=upper, duration_ms=duration_sec * 1000,
     )
 
 
+@dataclass
+class _ActivePlay:
+    """正在播放(或候选轮换中)的一次播放上下文。"""
+
+    song: QueueSong
+    rotator: BackupUrlRotator
+    headers: dict[str, str] | None
+
+
 class MainWindow(QMainWindow):
     """主窗口:左侧导航(网易云歌单 + B站收藏夹)+ 歌曲列表 + 播放条。
 
-    播放队列 self._songs 是统一条目列表(来源标记 netease/bili),双击与
-    自动下一首都走 _play_index,按条目来源分发解析,两平台共用播放条。
+    播放队列 self._queue 持有统一条目(来源标记 netease/bili),双击列表、
+    队列窗口切跳与自动接播都经 _play_at 按条目来源分发解析,两平台共用
+    播放条。播放模式(顺序/随机/单曲循环)由 PlayQueue 管理;B站播放地址
+    加载失败时按 backupUrls 候选轮换重试(_on_load_failed)。
     """
 
     def __init__(self) -> None:
@@ -87,6 +95,7 @@ class MainWindow(QMainWindow):
         self.resize(1080, 680)
 
         self._store = LocalStore()
+        self._settings = self._store.load_settings()
         self._client = NeteaseClient()
         self._account: NeteaseAccount | None = None
         self._playlists: list[NeteasePlaylist] = []
@@ -95,9 +104,9 @@ class MainWindow(QMainWindow):
         self._bili_account: BiliAccount | None = None
         self._bili_folders: list[BiliFavFolder] = []
 
-        self._songs: list[_QueueSong] = []
-        self._current_index = -1
+        self._queue = PlayQueue(mode=PlayMode(self._settings.get("play_mode", "sequence")))
         self._resolving = False
+        self._active: _ActivePlay | None = None
         self._table_header = _HEADER_NETEASE
 
         try:
@@ -123,13 +132,13 @@ class MainWindow(QMainWindow):
         self.song_table.setAlternatingRowColors(True)
         self.song_table.cellDoubleClicked.connect(self._on_cell_double_clicked)
 
-        settings_page = QLabel("设置(M3+ 再补)")
-        settings_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.settings_page = SettingsPage()
+        self._wire_settings_page()
 
         self.central_stack = QStackedWidget()
         self.central_stack.addWidget(self.login_page)  # 0
         self.central_stack.addWidget(self.song_table)  # 1
-        self.central_stack.addWidget(settings_page)  # 2
+        self.central_stack.addWidget(self.settings_page)  # 2
 
         # -- 侧栏 -------------------------------------------------------------
         self.sidebar = QListWidget()
@@ -142,6 +151,7 @@ class MainWindow(QMainWindow):
         if self.engine is not None:
             self._wire_engine()
         self._wire_player_bar()
+        self._wire_queue()
 
         body = QWidget()
         layout = QHBoxLayout(body)
@@ -156,6 +166,17 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(body)
 
         self.statusBar().showMessage("就绪")
+
+        # -- 托盘 / 媒体键 / 队列窗口 ------------------------------------------
+        self._queue_window: QueueWindow | None = None
+        self._tray: TrayController | None = None
+        self._tray_hint_shown = False
+        self._force_exit = False
+        self._media_keys: MediaKeyHandler | None = None
+        app_icon = build_placeholder_icon()
+        self.setWindowIcon(app_icon)
+        self._setup_tray(app_icon)
+        self._setup_media_keys()
 
         self._rebuild_sidebar()
         self.central_stack.setCurrentIndex(_PAGE_LOGIN)
@@ -232,6 +253,7 @@ class MainWindow(QMainWindow):
         self._rebuild_sidebar()
         self.central_stack.setCurrentIndex(_PAGE_TABLE)
         self.song_table.setRowCount(0)
+        self._queue.replace([])
         self._load_playlists()
 
     def _handle_stale_login(self, message: str) -> None:
@@ -239,8 +261,7 @@ class MainWindow(QMainWindow):
         self._client.logout()
         self._account = None
         self._playlists = []
-        self._songs = []
-        self._current_index = -1
+        self._queue.replace([])
         self._rebuild_sidebar()
         self.central_stack.setCurrentIndex(_PAGE_LOGIN)
         self.login_page.start()
@@ -350,7 +371,8 @@ class MainWindow(QMainWindow):
             if not isinstance(songs, list):
                 return
             self._table_header = _HEADER_NETEASE
-            self._songs = [_netease_song_to_queue(s) for s in songs]
+            # 切换列表即重置队列(保留既有行为):当前曲/历史清空
+            self._queue.replace([_netease_song_to_queue(s) for s in songs])
             self._fill_song_table()
             self.statusBar().showMessage(f"{title} · 共 {len(songs)} 首")
 
@@ -396,13 +418,16 @@ class MainWindow(QMainWindow):
                 return
             playable = [item for item in items if item.playable]
             self._table_header = _HEADER_BILI
-            self._songs = [
-                _bili_item_to_queue(
-                    item.id, item.bvid or "", item.title or "", item.upper_name,
-                    item.duration_sec,
-                )
-                for item in playable
-            ]
+            # 切换收藏夹即重置队列(保留既有行为)
+            self._queue.replace(
+                [
+                    _bili_item_to_queue(
+                        item.id, item.bvid or "", item.title or "", item.upper_name,
+                        item.duration_sec,
+                    )
+                    for item in playable
+                ]
+            )
             self._fill_song_table()
             skipped = len(items) - len(playable)
             suffix = f"(跳过 {skipped} 条不可播内容)" if skipped else ""
@@ -490,9 +515,10 @@ class MainWindow(QMainWindow):
     # -- 歌曲表 ---------------------------------------------------------------
 
     def _fill_song_table(self) -> None:
+        songs = self._queue.items()
         self.song_table.setHorizontalHeaderLabels(self._table_header)
-        self.song_table.setRowCount(len(self._songs))
-        for row, song in enumerate(self._songs):
+        self.song_table.setRowCount(len(songs))
+        for row, song in enumerate(songs):
             number = QTableWidgetItem(str(row + 1))
             number.setTextAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
@@ -508,18 +534,18 @@ class MainWindow(QMainWindow):
     # -- 播放 ----------------------------------------------------------------
 
     def _on_cell_double_clicked(self, row: int, _column: int) -> None:
-        self._play_index(row)
+        self._play_at(row)
 
-    def _play_index(self, index: int) -> None:
-        if not (0 <= index < len(self._songs)):
+    def _play_at(self, index: int) -> None:
+        song = self._queue.item_at(index)
+        if song is None:
             return
         if self.engine is None:
             self.statusBar().showMessage(self._engine_error or "播放内核不可用")
             return
         if self._resolving:
             return
-        song = self._songs[index]
-        self._current_index = index
+        self._queue.jump(index)
         self._resolving = True
         self.player_bar.set_track(
             f"{song.title} - {song.artist}" if song.artist else song.title
@@ -558,7 +584,7 @@ class MainWindow(QMainWindow):
 
         run_async(resolve, on_done=on_done, on_error=on_error)
 
-    def _make_netease_play_done(self, song: _QueueSong):
+    def _make_netease_play_done(self, song: QueueSong):
         def on_done(result) -> None:
             self._resolving = False
             kind, payload = result
@@ -571,16 +597,19 @@ class MainWindow(QMainWindow):
                     self, "播放失败", str(payload), QMessageBox.StandardButton.Ok
                 )
                 return
-            if payload.is_preview:
-                self.statusBar().showMessage("当前为试听片段(完整播放需开通 VIP)")
-            else:
-                self.statusBar().showMessage(f"正在播放:{song.title}")
-            self.player_bar.set_active(True)
-            self.engine.play_url(payload.url)
+            status = (
+                "当前为试听片段(完整播放需开通 VIP)"
+                if payload.is_preview
+                else f"正在播放:{song.title}"
+            )
+            # 网易云不参与 backupUrls 轮换:音质回退链已在解析层完成
+            self._start_play(
+                song, BackupUrlRotator([payload.url]), None, status=status
+            )
 
         return on_done
 
-    def _make_bili_play_done(self, song: _QueueSong):
+    def _make_bili_play_done(self, song: QueueSong):
         def on_done(result) -> None:
             self._resolving = False
             kind, payload = result
@@ -592,32 +621,135 @@ class MainWindow(QMainWindow):
             if kind == "error":
                 self.statusBar().showMessage(f"播放失败:{payload}")
                 return
-            self.statusBar().showMessage(f"正在播放:{song.title}")
-            self.player_bar.set_active(True)
-            # B站 m4s 音频流要求 Referer + 浏览器 UA,否则 403
-            self.engine.play_url(payload.url, build_bili_stream_headers())
+            # B站 m4s 音频流要求 Referer + 浏览器 UA,否则 403;
+            # candidate_urls 含主 URL 与 backupUrls,加载失败时轮换
+            self._start_play(
+                song,
+                BackupUrlRotator(payload.candidate_urls),
+                build_bili_stream_headers(),
+            )
 
         return on_done
 
+    def _start_play(
+        self,
+        song: QueueSong,
+        rotator: BackupUrlRotator,
+        headers: dict[str, str] | None,
+        status: str | None = None,
+    ) -> None:
+        url = rotator.current
+        if not url:
+            self.statusBar().showMessage(f"播放失败:{song.title}(无可用播放地址)")
+            return
+        self._active = _ActivePlay(song=song, rotator=rotator, headers=headers)
+        self.player_bar.set_active(True)
+        self.statusBar().showMessage(status or f"正在播放:{song.title}")
+        self.engine.play_url(url, headers)
+
+    def _on_load_failed(self, message: str) -> None:
+        """engine 加载失败类错误:B站按 backupUrls 候选轮换重试,耗尽才报失败。"""
+        active = self._active
+        if active is None:
+            self.statusBar().showMessage(f"播放失败:{message}")
+            return
+        if active.rotator.has_next():
+            next_url = active.rotator.advance()
+            self.statusBar().showMessage(
+                f"播放失败,切换备用线路重试"
+                f"({active.rotator.position}/{len(active.rotator)}):{active.song.title}"
+            )
+            self.engine.play_url(next_url, active.headers)
+            return
+        self.statusBar().showMessage(f"播放失败:{message}")
+
     def _play_next(self) -> None:
-        if 0 <= self._current_index < len(self._songs) - 1:
-            self._play_index(self._current_index + 1)
-        else:
-            if self.engine is not None:
-                self.engine.stop()
-            self.player_bar.set_playing(False)
-            self.statusBar().showMessage("播放完毕")
+        index = self._queue.next()
+        if index is None:
+            return
+        self._play_at(index)
 
     def _play_prev(self) -> None:
-        if self._current_index > 0:
-            self._play_index(self._current_index - 1)
+        index = self._queue.prev()
+        if index is None:
+            return
+        self._play_at(index)
+
+    def _on_track_ended(self) -> None:
+        """一首播完:按模式自动接播(单曲循环重播当前,顺序到尾即停)。"""
+        if self._queue.mode() is PlayMode.REPEAT_ONE and self._active is not None:
+            url = self._active.rotator.current
+            if url:
+                self.statusBar().showMessage(f"单曲循环:{self._active.song.title}")
+                self.engine.play_url(url, self._active.headers)
+                return
+        index = self._queue.advance_ended()
+        if index is None:
+            self.player_bar.set_playing(False)
+            self.statusBar().showMessage("播放完毕")
+            return
+        self._play_at(index)
+
+    # -- 播放模式 --------------------------------------------------------------
+
+    def _cycle_mode(self) -> None:
+        current = self._queue.mode()
+        try:
+            position = _MODE_CYCLE.index(current)
+        except ValueError:
+            position = 0
+        self._set_play_mode(_MODE_CYCLE[(position + 1) % len(_MODE_CYCLE)])
+
+    def _set_play_mode(self, mode: PlayMode) -> None:
+        self._queue.set_mode(mode)
+        self._settings["play_mode"] = mode.value
+        self._store.save_settings(self._settings)
+        self.settings_page.set_play_mode(mode.value)
+        self.statusBar().showMessage(f"播放模式:{mode.display_name}")
+
+    def _on_queue_mode_changed(self, mode) -> None:
+        self.player_bar.set_mode(mode.button_label, mode.display_name)
+
+    def _on_settings_play_mode(self, value: str) -> None:
+        try:
+            mode = PlayMode(value)
+        except ValueError:
+            return
+        self._set_play_mode(mode)
+
+    def _on_settings_close_action(self, action: str) -> None:
+        self._settings["close_action"] = action
+        self._store.save_settings(self._settings)
+
+    def _wire_settings_page(self) -> None:
+        page = self.settings_page
+        page.close_action_changed.connect(self._on_settings_close_action)
+        page.play_mode_changed.connect(self._on_settings_play_mode)
+        page.set_close_action(self._settings.get("close_action", "tray"))
+        page.set_play_mode(self._settings.get("play_mode", "sequence"))
+
+    # -- 队列窗口 --------------------------------------------------------------
+
+    def _open_queue_window(self) -> None:
+        if self._queue_window is None:
+            self._queue_window = QueueWindow(self._queue, self)
+            self._queue_window.jump_requested.connect(self._play_at)
+        self._queue_window.show()
+        self._queue_window.raise_()
+        self._queue_window.activateWindow()
+
+    def _wire_queue(self) -> None:
+        mode = self._queue.mode()
+        self.player_bar.set_mode(mode.button_label, mode.display_name)
+        self._queue.mode_changed.connect(self._on_queue_mode_changed)
 
     # -- 信号接线 ------------------------------------------------------------
 
     def _wire_engine(self) -> None:
         self.engine.progress.connect(self.player_bar.set_progress)
         self.engine.playing_changed.connect(self.player_bar.set_playing)
-        self.engine.track_ended.connect(self._play_next)
+        self.engine.track_ended.connect(self._on_track_ended)
+        self.engine.load_failed.connect(self._on_load_failed)
         self.engine.error.connect(
             lambda message: self.statusBar().showMessage(f"播放错误:{message}")
         )
@@ -629,6 +761,8 @@ class MainWindow(QMainWindow):
         bar.next_clicked.connect(self._play_next)
         bar.seek_requested.connect(self._on_seek_requested)
         bar.volume_changed.connect(self._on_volume_changed)
+        bar.mode_clicked.connect(self._cycle_mode)
+        bar.queue_clicked.connect(self._open_queue_window)
 
     def _toggle_pause(self) -> None:
         if self.engine is not None:
@@ -642,10 +776,80 @@ class MainWindow(QMainWindow):
         if self.engine is not None:
             self.engine.set_volume(volume)
 
+    # -- 托盘与媒体键 ------------------------------------------------------------
+
+    def _setup_tray(self, icon) -> None:
+        """托盘不可用(如离屏环境)时静默跳过,不影响主流程。"""
+        try:
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                return
+            self._tray = TrayController(icon, self)
+        except Exception:  # noqa: BLE001 - 托盘属增强能力,绝不因此崩启动
+            self._tray = None
+            return
+        tray = self._tray
+        tray.toggle_play_requested.connect(self._toggle_pause)
+        tray.prev_requested.connect(self._play_prev)
+        tray.next_requested.connect(self._play_next)
+        tray.show_main_requested.connect(self._show_main_window)
+        tray.exit_requested.connect(self._exit_app)
+
+    def _setup_media_keys(self) -> None:
+        if sys.platform != "win32":
+            return
+        try:
+            # handler 必须持引用,防止 native filter 被 GC
+            self._media_keys = MediaKeyHandler(self)
+        except Exception:  # noqa: BLE001 - 媒体键属增强能力,失败不崩启动
+            self._media_keys = None
+            return
+        keys = self._media_keys
+        keys.play_pause_requested.connect(self._toggle_pause)
+        keys.stop_requested.connect(self._on_media_stop)
+        keys.next_requested.connect(self._play_next)
+        keys.prev_requested.connect(self._play_prev)
+
+    def _on_media_stop(self) -> None:
+        if self.engine is not None:
+            self.engine.stop()
+        self.player_bar.set_playing(False)
+        self.statusBar().showMessage("已停止")
+
+    def _show_main_window(self) -> None:
+        self.show()
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _exit_app(self) -> None:
+        """托盘菜单「退出」:绕过「最小化到托盘」逻辑,真正退出。"""
+        self._force_exit = True
+        self.close()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
     # -- 退出清理 ------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
+        if (
+            not self._force_exit
+            and self._settings.get("close_action") == "tray"
+            and self._tray is not None
+        ):
+            # 收进托盘:隐藏窗口继续播放;首次给气泡提示
+            event.ignore()
+            self.hide()
+            if not self._tray_hint_shown:
+                self._tray.show_message(
+                    "NeriPlayer Win",
+                    "已最小化到托盘:双击托盘图标恢复窗口,右键菜单可退出。",
+                )
+                self._tray_hint_shown = True
+            return
         self.login_page.stop()
+        if self._queue_window is not None:
+            self._queue_window.close()
         if self.engine is not None:
             # 只停播,不 terminate:libmpv 销毁在 Windows 上与事件线程存在
             # 平台级竞争(随机崩溃),交给进程退出回收,音频已停无副作用
