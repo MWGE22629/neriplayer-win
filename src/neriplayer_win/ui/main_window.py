@@ -850,6 +850,11 @@ class MainWindow(QMainWindow):
         self.login_page.stop()
         if self._queue_window is not None:
             self._queue_window.close()
+        if self._media_keys is not None:
+            try:
+                self._media_keys.stop()
+            except Exception:  # noqa: BLE001 - 退出路径不抛
+                pass
         if self.engine is not None:
             # 只停播,不 terminate:libmpv 销毁在 Windows 上与事件线程存在
             # 平台级竞争(随机崩溃),交给进程退出回收,音频已停无副作用
