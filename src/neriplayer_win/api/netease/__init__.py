@@ -28,10 +28,12 @@ from .models import (
     NeteaseNoPlayUrlError,
     NeteasePlaylist,
     NeteaseSong,
+    NeteaseYdSnapshot,
     PlayableUrl,
     QrLoginCheckResult,
     QrLoginSession,
 )
+from .yd import YdTokenFetcher
 
 __all__ = [
     "DEFAULT_QUALITY",
@@ -44,9 +46,11 @@ __all__ = [
     "NeteaseNoPlayUrlError",
     "NeteasePlaylist",
     "NeteaseSong",
+    "NeteaseYdSnapshot",
     "PlayableUrl",
     "QrLoginCheckResult",
     "QrLoginSession",
+    "YdTokenFetcher",
     "build_quality_candidates",
     "build_qr_account_params",
     "merge_netease_request_cookies",

@@ -132,7 +132,7 @@ class MainWindow(QMainWindow):
 
     def _on_boot_status(self, account) -> None:
         if account is None:
-            self._handle_stale_login("登录已过期,请重新扫码")
+            self._handle_stale_login("登录已过期,请重新登录")
             return
         self._enter_logged_in(account)
 
@@ -152,7 +152,7 @@ class MainWindow(QMainWindow):
 
     def _on_login_account(self, account) -> None:
         if account is None:
-            self._handle_stale_login("登录态无效,请重新扫码")
+            self._handle_stale_login("登录态无效,请重新登录")
             return
         self._enter_logged_in(account)
 
@@ -304,7 +304,7 @@ class MainWindow(QMainWindow):
             self._resolving = False
             kind, payload = result
             if kind == "auth":
-                self._handle_stale_login("登录态已失效,请重新扫码")
+                self._handle_stale_login("登录态已失效,请重新登录")
                 return
             if kind == "error":
                 self.statusBar().showMessage(f"播放失败:{payload}")

@@ -26,6 +26,20 @@ class NeteaseNoPlayUrlError(NeteaseApiError):
 
 
 @dataclass(frozen=True)
+class NeteaseYdSnapshot:
+    """易盾(YD)指纹快照,对应 Kotlin NeteaseYdDeviceSnapshot。
+
+    token: createNEFingerprint 生成的设备令牌;空串表示不可用(回退路径)。
+    s_device_id: 指纹页下发的 sDeviceId Cookie,参与登录 chainId 生成。
+    cookies: 指纹页收集到的域 Cookie,创建扫码会话前种进 API 会话。
+    """
+
+    token: str = ""
+    s_device_id: str = ""
+    cookies: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class NeteaseAccount:
     user_id: int
     nickname: str

@@ -44,6 +44,7 @@ from .models import (
     NeteaseNoPlayUrlError,
     NeteasePlaylist,
     NeteaseSong,
+    NeteaseYdSnapshot,
     PlayableUrl,
     QrLoginCheckResult,
     QrLoginSession,
@@ -359,6 +360,10 @@ class _RequestSession:
             "NMTID": crypto.new_session_cookie_value(),
         }
         self._seed_persisted()
+
+    def seed_runtime_cookies(self, host: str, cookies: Mapping[str, str]) -> None:
+        """把指纹页等运行期 Cookie 种进会话(对应 seedCookieJarFromSnapshot)。"""
+        self._runtime.seed_domain_cookies(host, cookies)
 
     def _seed_persisted(self) -> None:
         self._runtime.seed_domain_cookies(NETEASE_MAIN_HOST, self._persisted)
@@ -917,8 +922,17 @@ class NeteaseClient:
             raise NeteaseApiError("网易云扫码登录响应为空")
         return json.loads(raw)
 
-    def create_qr_session(self) -> QrLoginSession:
-        """申请 unikey 并组装二维码内容(对应 createSession)。"""
+    def create_qr_session(self, yd: NeteaseYdSnapshot | None = None) -> QrLoginSession:
+        """申请 unikey 并组装二维码内容(对应 createSession)。
+
+        yd: 指纹快照。Cookie 先种进会话再申请 unikey(对应
+        seedCookieStoreFromSnapshot),chainId 由 sDeviceId 参与生成,
+        令牌随后随轮询请求发送。缺省等价 Kotlin 的空快照回退
+        (服务端风控可能拒绝空指纹的登录会话)。
+        """
+        snapshot = yd or NeteaseYdSnapshot()
+        if snapshot.cookies:
+            self._session.seed_runtime_cookies(NETEASE_MAIN_HOST, snapshot.cookies)
         result = self._qr_execute_json_post(
             _QR_UNIKEY_PATH, {"type": 1, "noCheckToken": True}
         )
@@ -929,10 +943,8 @@ class NeteaseClient:
             raise NeteaseApiError(
                 f"创建扫码登录会话失败: {message or f'code={code}'}", code=int(code)
             )
-        # 桌面端没有 WebView 指纹,按 Kotlin 中 provider 失败的回退:
-        # token 为空、deviceId 用 unknown-<rand>。
-        yd_device_token = ""
-        chain_id = self._create_login_chain_id("")
+        yd_device_token = snapshot.token
+        chain_id = self._create_login_chain_id(snapshot.s_device_id)
         return QrLoginSession(
             key=key,
             chain_id=chain_id,
@@ -1004,12 +1016,16 @@ class NeteaseClient:
 
     @staticmethod
     def _build_scan_login_url(key: str, chain_id: str) -> str:
-        """扫码二维码内容。
+        """扫码二维码内容,对应 buildScanLoginUrl(scanlogin 新式登录页)。
 
-        上游 Kotlin 用 /st/platform/scanlogin(新式登录页),但该页是
-        "Netease Fan Connect" JS 壳,逻辑依赖 CDN 脚本,部分手机 App 版本
-        的内嵌 WebView 打不开(实测现象:扫码后提示连不上官方登录页面)。
-        改用多年稳定的传统格式 music.163.com/login?codekey=,unikey 与
-        轮询端点完全相同;chain_id 仅服务于新式页面的遥测,保留参数但不进 URL。
+        注意:指纹(YD 快照)是这套新式流程的前置条件——没有指纹 Cookie/令牌
+        创建的 unikey,手机端 scanlogin 页面会初始化失败(表现为"连不上
+        官方登录页面");改用传统 login?codekey= 格式则手机确认后轮询会被
+        服务端以"请切换其他登录方式或升级新版本"拒绝。两者都实测过,
+        因此必须走新式 URL + 真实指纹。
         """
-        return f"https://{NETEASE_MAIN_HOST}/login?codekey={key}"
+        return (
+            f"https://{NETEASE_MAIN_HOST}/st/platform/scanlogin"
+            f"?codekey={key}&chainId={chain_id}"
+            f"&hdw_device=web&hdw_appid=web&hitExp=1"
+        )
