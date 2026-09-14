@@ -90,7 +90,17 @@ def tinted_icon_with_color(
         painter.fillRect(0, 0, size, size, color)
     finally:
         painter.end()
-    icon = QIcon(pixmap)
+    # 显式注册全部模式:分区头等 NoItemFlags 条目会以 Disabled 模式渲染,
+    # QIcon 若只有 Normal pixmap,Qt 会自动生成"禁用灰"版本(品牌标
+    # 恒灰的根因)。四种模式给同一张图,渲染始终是染色结果。
+    icon = QIcon()
+    for mode in (
+        QIcon.Mode.Normal,
+        QIcon.Mode.Active,
+        QIcon.Mode.Disabled,
+        QIcon.Mode.Selected,
+    ):
+        icon.addPixmap(pixmap, mode)
     _cache[key] = icon
     return icon
 
