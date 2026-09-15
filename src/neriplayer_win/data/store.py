@@ -20,7 +20,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 _DATA_DIR_ENV = "NERIPLAYER_WIN_DATA_DIR"
 _NETEASE_FILE = "netease.json"
@@ -31,15 +31,29 @@ _SETTINGS_FILE = "settings.json"
 # close_action 默认 "tray"(最小化到托盘,符合播放器习惯);"exit" 直接退出。
 # play_mode 对应 player.queue.PlayMode 的枚举值。
 # M4 增加 appearance:外观主题("dark" 暗色 / "light" 亮色),默认 dark。
+# M5 增加 play_quality:播放音质偏好,取网易云档位键(standard/exhigh/
+# lossless,B站侧由 selector 的映射函数换算);默认 lossless 保持既有行为。
+# M5 增加侧栏树状态:sidebar_expanded 记录平台分区折叠状态
+# ({"netease": bool, "bili": bool},默认全展开);netease_playlist_order /
+# bili_folder_order 记录分区内拖拽排序后的条目 id 顺序(加载时按存储序
+# 重排,新条目追加尾部,存储里已失效的 id 在重排时静默清掉)。
 SETTING_CLOSE_ACTION = "close_action"
 SETTING_PLAY_MODE = "play_mode"
 SETTING_APPEARANCE = "appearance"
+SETTING_PLAY_QUALITY = "play_quality"
+SETTING_SIDEBAR_EXPANDED = "sidebar_expanded"
+SETTING_NETEASE_PLAYLIST_ORDER = "netease_playlist_order"
+SETTING_BILI_FOLDER_ORDER = "bili_folder_order"
 DEFAULT_CLOSE_ACTION = "tray"
 DEFAULT_PLAY_MODE = "sequence"
 DEFAULT_APPEARANCE = "dark"
+DEFAULT_PLAY_QUALITY = "lossless"
 _VALID_CLOSE_ACTIONS = ("exit", "tray")
 _VALID_PLAY_MODES = ("sequence", "shuffle", "repeat_one")
 _VALID_APPEARANCES = ("dark", "light")
+_VALID_PLAY_QUALITIES = ("standard", "exhigh", "lossless")
+_SIDEBAR_SECTIONS = ("netease", "bili")
+_SETTING_ID_ORDERS = (SETTING_NETEASE_PLAYLIST_ORDER, SETTING_BILI_FOLDER_ORDER)
 
 
 def default_settings() -> dict[str, Any]:
@@ -48,6 +62,10 @@ def default_settings() -> dict[str, Any]:
         SETTING_CLOSE_ACTION: DEFAULT_CLOSE_ACTION,
         SETTING_PLAY_MODE: DEFAULT_PLAY_MODE,
         SETTING_APPEARANCE: DEFAULT_APPEARANCE,
+        SETTING_PLAY_QUALITY: DEFAULT_PLAY_QUALITY,
+        SETTING_SIDEBAR_EXPANDED: {section: True for section in _SIDEBAR_SECTIONS},
+        SETTING_NETEASE_PLAYLIST_ORDER: [],
+        SETTING_BILI_FOLDER_ORDER: [],
     }
 
 _COOKIE_NAME_REGEX = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
@@ -92,6 +110,44 @@ def validate_and_sanitize_netease_cookies(
         sanitized.setdefault("os", _FALLBACK_OS)
         sanitized.setdefault("appver", _FALLBACK_APPVER)
     return sanitized, rejected
+
+
+def _validated_sidebar_expanded(value: Any) -> dict[str, bool]:
+    """sidebar_expanded 白名单校验:非 dict 或已知键值非 bool 时逐键回落默认。"""
+    merged = {section: True for section in _SIDEBAR_SECTIONS}
+    if isinstance(value, dict):
+        for section in _SIDEBAR_SECTIONS:
+            flag = value.get(section)
+            if isinstance(flag, bool):
+                merged[section] = flag
+    return merged
+
+
+def _validated_id_order(value: Any) -> list[int] | None:
+    """排序键校验:list 且元素全为 int(bool 不算——Python 的 bool 是 int 子类)。"""
+    if isinstance(value, list) and all(
+        isinstance(item, int) and not isinstance(item, bool) for item in value
+    ):
+        return value
+    return None
+
+
+def apply_stored_order(stored: Sequence[int], current: Sequence[int]) -> list[int]:
+    """分区内显示顺序(M5 纯函数):按存储顺序重排 current 的 id 列表。
+
+    - 存储里仍存在的 id 按存储序排前(存储里的重复项只保留首个);
+    - current 新出现的 id 追加尾部(保持其相对顺序);
+    - 存储里已失效的 id 自然丢弃——调用方比较结果与存储即可静默清理。
+    """
+    current_ids = set(current)
+    seen: set[int] = set()
+    ordered: list[int] = []
+    for item_id in stored:
+        if item_id in current_ids and item_id not in seen:
+            seen.add(item_id)
+            ordered.append(item_id)
+    ordered.extend(item_id for item_id in current if item_id not in seen)
+    return ordered
 
 
 class LocalStore:
@@ -248,6 +304,15 @@ class LocalStore:
             merged[SETTING_PLAY_MODE] = data[SETTING_PLAY_MODE]
         if data.get(SETTING_APPEARANCE) in _VALID_APPEARANCES:
             merged[SETTING_APPEARANCE] = data[SETTING_APPEARANCE]
+        if data.get(SETTING_PLAY_QUALITY) in _VALID_PLAY_QUALITIES:
+            merged[SETTING_PLAY_QUALITY] = data[SETTING_PLAY_QUALITY]
+        merged[SETTING_SIDEBAR_EXPANDED] = _validated_sidebar_expanded(
+            data.get(SETTING_SIDEBAR_EXPANDED)
+        )
+        for key in _SETTING_ID_ORDERS:
+            order = _validated_id_order(data.get(key))
+            if order is not None:
+                merged[key] = order
         return merged
 
     def save_settings(self, settings: Mapping[str, Any]) -> bool:
@@ -259,6 +324,15 @@ class LocalStore:
             merged[SETTING_PLAY_MODE] = settings[SETTING_PLAY_MODE]
         if settings.get(SETTING_APPEARANCE) in _VALID_APPEARANCES:
             merged[SETTING_APPEARANCE] = settings[SETTING_APPEARANCE]
+        if settings.get(SETTING_PLAY_QUALITY) in _VALID_PLAY_QUALITIES:
+            merged[SETTING_PLAY_QUALITY] = settings[SETTING_PLAY_QUALITY]
+        merged[SETTING_SIDEBAR_EXPANDED] = _validated_sidebar_expanded(
+            settings.get(SETTING_SIDEBAR_EXPANDED)
+        )
+        for key in _SETTING_ID_ORDERS:
+            order = _validated_id_order(settings.get(key))
+            if order is not None:
+                merged[key] = order
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
             self._settings_path.write_text(

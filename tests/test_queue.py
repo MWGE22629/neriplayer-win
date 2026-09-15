@@ -185,6 +185,132 @@ class TestPlayQueueRepeatOne:
         assert queue.prev() == 0
 
 
+def queue_state(queue: PlayQueue) -> tuple:
+    """当前索引 + 已播历史快照(白盒):断言 peek_next 完全非变异用。"""
+    return (queue.current_index(), list(queue._history), queue._history_pos)
+
+
+class TestPeekNext:
+    """peek_next:非变异预览 advance_ended 的接播目标(下一首预取用)。"""
+
+    def test_empty_queue(self, qapp):
+        queue = PlayQueue()
+        assert queue.peek_next() is None
+
+    def test_sequence_mid_queue(self, qapp):
+        queue = PlayQueue()
+        queue.replace([song(i) for i in range(3)])
+        queue.jump(1)
+        assert queue.peek_next() == 2
+        assert queue.peek_next() == 2  # 可重复预览,幂等无副作用
+        # 当前曲与历史完全未动、无信号
+        assert queue_state(queue) == (1, [1], 0)
+        assert queue.advance_ended() == 2  # 预览结果与真实接播一致
+
+    def test_sequence_at_queue_end(self, qapp):
+        queue = PlayQueue()
+        queue.replace([song(i) for i in range(3)])
+        queue.jump(2)
+        assert queue.peek_next() is None  # 队尾不回绕,与 advance_ended 一致
+        assert queue_state(queue) == (2, [2], 0)
+
+    def test_repeat_one_returns_current(self, qapp):
+        queue = PlayQueue(mode=PlayMode.REPEAT_ONE)
+        queue.replace([song(i) for i in range(3)])
+        queue.jump(1)
+        assert queue.peek_next() == 1  # 播完重播当前曲:调用方免预取(URL 已在手)
+        assert queue_state(queue) == (1, [1], 0)
+
+    def test_shuffle_returns_none(self, qapp):
+        random.seed(3)
+        queue = PlayQueue(mode=PlayMode.SHUFFLE)
+        queue.replace([song(i) for i in range(4)])
+        queue.jump(0)
+        assert queue.peek_next() is None  # 随机不可预知,放弃预取
+        assert queue_state(queue) == (0, [0], 0)
+
+    def test_no_current_returns_none(self, qapp):
+        queue = PlayQueue()
+        queue.replace([song(i) for i in range(3)])
+        assert queue.current_index() == -1
+        assert queue.peek_next() is None
+        assert queue_state(queue) == (-1, [], -1)
+
+    def test_emits_no_signals(self, qapp):
+        queue = PlayQueue()
+        queue.replace([song(i) for i in range(3)])
+        queue.jump(0)
+        received: list[int] = []
+        queue.current_changed.connect(received.append)
+        queue.peek_next()
+        assert received == []
+
+
+class TestAdvanceAfterFailure:
+    """失败后接播(与播完接播不同):一律切下一首,单曲循环也不重播当前。"""
+
+    def test_sequence_mid_queue(self, qapp):
+        queue = PlayQueue()
+        queue.replace([song(i) for i in range(3)])
+        queue.jump(1)
+        received: list[int] = []
+        queue.current_changed.connect(received.append)
+        assert queue.advance_after_failure() == 2
+        assert queue.current_index() == 2
+        assert received == [2]  # 接播要发 current_changed
+
+    def test_sequence_at_queue_end_stops(self, qapp):
+        queue = PlayQueue()
+        queue.replace([song(i) for i in range(3)])
+        queue.jump(2)
+        assert queue.advance_after_failure() is None
+        assert queue.current_index() == 2  # 队尾不回绕,停在原地
+
+    def test_empty_queue(self, qapp):
+        queue = PlayQueue()
+        assert queue.advance_after_failure() is None
+
+    def test_invalid_index_does_not_pick(self, qapp):
+        queue = PlayQueue()
+        queue.replace([song(i) for i in range(3)])
+        assert queue.current_index() == -1
+        assert queue.advance_after_failure() is None  # 无当前曲不接播
+
+    def test_repeat_one_mid_queue_skips_current(self, qapp):
+        queue = PlayQueue(mode=PlayMode.REPEAT_ONE)
+        queue.replace([song(i) for i in range(3)])
+        queue.jump(1)
+        # 关键差异:advance_ended 会重播当前曲,失败接播绝不能(坏源死循环)
+        assert queue.advance_ended() == 1
+        queue.jump(1)
+        assert queue.advance_after_failure() == 2
+        assert queue.current_index() == 2
+
+    def test_repeat_one_at_queue_end_stops(self, qapp):
+        queue = PlayQueue(mode=PlayMode.REPEAT_ONE)
+        queue.replace([song(i) for i in range(3)])
+        queue.jump(2)
+        assert queue.advance_after_failure() is None
+
+    def test_shuffle_never_repeats_current(self, qapp):
+        random.seed(20260915)
+        queue = PlayQueue(mode=PlayMode.SHUFFLE)
+        queue.replace([song(i) for i in range(5)])
+        queue.jump(0)
+        previous = queue.current_index()
+        for _ in range(50):
+            index = queue.advance_after_failure()
+            assert index is not None and index != previous
+            previous = index
+
+    def test_shuffle_single_track_returns_self(self, qapp):
+        # 单曲随机无别可选:回到自身(连播死循环由 UI 层熔断兜底)
+        queue = PlayQueue(mode=PlayMode.SHUFFLE)
+        queue.replace([song(0)])
+        queue.jump(0)
+        assert queue.advance_after_failure() == 0
+
+
 class TestPlayQueueReplaceResetAndSignals:
     """replace/reset/jump/set_mode 的状态与信号语义。"""
 
@@ -345,5 +471,14 @@ class TestSettingsStore:
         store = self.make_store(tmp_path, monkeypatch)
         store.save_settings({"close_action": "exit", "play_mode": "sequence", "junk": 1})
         raw = json.loads(store.settings_path.read_text(encoding="utf-8"))
-        # M4 起新增 appearance 键;未知键始终被拒
-        assert set(raw) == {"close_action", "play_mode", "appearance"}
+        # M4 起新增 appearance、M5 起新增 play_quality / sidebar_expanded /
+        # netease_playlist_order / bili_folder_order 键;未知键始终被拒
+        assert set(raw) == {
+            "close_action",
+            "play_mode",
+            "appearance",
+            "play_quality",
+            "sidebar_expanded",
+            "netease_playlist_order",
+            "bili_folder_order",
+        }

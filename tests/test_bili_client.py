@@ -43,6 +43,8 @@ from neriplayer_win.api.bili.models import (
 )
 from neriplayer_win.api.bili.qr_login import parse_set_cookie_header
 from neriplayer_win.api.bili.selector import (
+    bili_quality_from_key,
+    bili_quality_key_from_netease_level,
     is_bili_stream_host,
     is_bili_stream_url,
     prioritize_bili_stream_urls,
@@ -515,6 +517,28 @@ class TestStreamSelection:
 
     def test_empty_returns_none(self):
         assert select_stream_by_preference([], "high") is None
+
+
+class TestNeteaseToBiliQualityKey:
+    """M5 音质偏好:网易云档位 → B站偏好键的换算(纯函数)。"""
+
+    def test_known_levels_map_to_tiers(self):
+        # standard→最低档 / exhigh→中档(常规有损最高)/ lossless→最高档
+        assert bili_quality_key_from_netease_level("standard") == "low"
+        assert bili_quality_key_from_netease_level("exhigh") == "high"
+        assert bili_quality_key_from_netease_level("lossless") == "lossless"
+
+    def test_all_mapping_results_are_valid_selector_keys(self):
+        # 映射产物必须落在 bili_quality_from_key 的合法键集合内,否则会被静默回退
+        for level in ("standard", "exhigh", "lossless"):
+            key = bili_quality_key_from_netease_level(level)
+            assert bili_quality_from_key(key).key == key
+
+    def test_unknown_or_empty_falls_back_to_high(self):
+        # 与 BiliClient.DEFAULT_AUDIO_QUALITY 一致的兜底
+        assert bili_quality_key_from_netease_level("jymaster") == "high"
+        assert bili_quality_key_from_netease_level("") == "high"
+        assert bili_quality_key_from_netease_level("  LOSSLESS ") == "lossless"
 
 
 # ---------------------------------------------------------------------------

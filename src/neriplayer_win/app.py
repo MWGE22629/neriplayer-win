@@ -27,11 +27,33 @@ from .ui.main_window import MainWindow
 QLoggingCategory.setFilterRules("qt.qpa.fonts.warning = false")
 
 
+def _boost_process_priority() -> None:
+    """Windows 下把本进程提到 ABOVE_NORMAL 优先级(增强项,失败静默)。
+
+    动机:游戏全屏时 Windows 会压制后台普通优先级进程的 CPU 配额,
+    后台放歌的切歌解析与 UI 响应都会变得迟钝;ABOVE_NORMAL 足以改善,
+    又刻意不用 HIGH_PRIORITY——反抢前台游戏的调度有违「后台播放」
+    的初衷。只应在 main() 里调用一次;不放在 MainWindow.__init__,
+    测试构造 MainWindow 不应改动进程优先级。
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        above_normal_priority_class = 0x00008000
+        process = ctypes.windll.kernel32.GetCurrentProcess()
+        ctypes.windll.kernel32.SetPriorityClass(process, above_normal_priority_class)
+    except Exception:  # noqa: BLE001 - 优先级属增强能力,绝不因此崩启动
+        pass
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("NeriPlayer Win")
     app.setOrganizationName("NeriPlayer Win")
     app.setWindowIcon(app_icon())  # 全部窗口/托盘默认图标(M4)
+    _boost_process_priority()  # M5:后台播放场景改善切歌与 UI 响应
     window = MainWindow()
     window.show()
     return app.exec()

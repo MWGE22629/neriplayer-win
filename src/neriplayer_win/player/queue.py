@@ -8,6 +8,7 @@
     (保持 M1/M2「播放完毕」语义,不无限循环)。
   - SHUFFLE:随机挑选但绝不立即重复当前曲;prev 沿已播历史回退。
   - REPEAT_ONE:播完自动重播当前曲;手动 next/prev 仍正常切歌。
+  - peek_next:非变异预览「播完将接播的下一曲」(供上层预取播放地址)。
 - BackupUrlRotator:B站 backupUrls 候选轮换(播放加载失败按序换候选,
   全部失败才判「播放失败」;网易云不参与,其音质回退链在解析层已完成)。
 
@@ -203,6 +204,50 @@ class PlayQueue(QObject):
             return 0
         if self._mode is PlayMode.REPEAT_ONE:
             return self._index
+        if self._mode is PlayMode.SHUFFLE:
+            chosen = self._pick_shuffle_next()
+            self._set_current(chosen)
+            return chosen
+        if self._index + 1 < count:
+            chosen = self._index + 1
+            self._set_current(chosen)
+            return chosen
+        return None
+
+    def peek_next(self) -> int | None:
+        """非变异地预览 advance_ended() 将接播的下一曲索引(下一首预取用)。
+
+        不设当前曲、不动历史、不发信号。各模式语义:
+        - 空队列 / 无有效当前曲 → None(没有正在播的歌就没有可预取对象)。
+        - SEQUENCE:index+1 存在则返回;已在队尾返回 None(不回绕,
+          与 advance_ended 的「到尾即停」一致)。
+        - REPEAT_ONE:返回当前索引。语义是播完重播当前曲——调用方发现
+          等于当前曲就不用预取,URL 已在手。
+        - SHUFFLE:返回 None。下一曲由随机决定、不可预知,预取大概率
+          落空,只能放弃(也不做预猜随机结果这类投机)。
+        """
+        count = len(self._items)
+        if count == 0 or not (0 <= self._index < count):
+            return None
+        if self._mode is PlayMode.REPEAT_ONE:
+            return self._index
+        if self._mode is PlayMode.SHUFFLE:
+            return None
+        if self._index + 1 < count:
+            return self._index + 1
+        return None
+
+    def advance_after_failure(self) -> int | None:
+        """播放失败后的自动接播;返回下一曲索引,None 表示不接播(停止)。
+
+        与 advance_ended 的关键差异:单曲循环下失败绝不重播当前曲(坏源会
+        死循环),一律切下一首。语义对齐 Android 参考实现
+        PlayerManagerPlaybackFailurePolicy:有下一曲→NEXT;否则 STOP
+        (桌面端无 repeat-all 模式,队尾不回绕)。
+        """
+        count = len(self._items)
+        if count == 0 or not (0 <= self._index < count):
+            return None
         if self._mode is PlayMode.SHUFFLE:
             chosen = self._pick_shuffle_next()
             self._set_current(chosen)

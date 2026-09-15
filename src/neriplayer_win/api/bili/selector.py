@@ -100,6 +100,31 @@ def bili_quality_from_key(key: str) -> BiliQuality:
     return BiliQuality.HIGH
 
 
+# M5「音质偏好」共用一套档位:网易云侧只有 standard/exhigh/lossless 三档,
+# 这里换算成 B站 selector 的实际偏好键(低/中/高三档各取其位)。
+_NETEASE_TO_BILI_QUALITY_KEY = {
+    "standard": BiliQuality.LOW.key,
+    "exhigh": BiliQuality.HIGH.key,
+    "lossless": BiliQuality.LOSSLESS.key,
+}
+
+
+def bili_quality_key_from_netease_level(netease_quality: str) -> str:
+    """网易云音质档位 → B站音质偏好 key(纯函数,便于单测)。
+
+    对应关系(以 _BILI_QUALITY_ORDER 的实际键为准):
+    - standard(标准 128K)→ low:B站常规音轨的最低档;
+    - exhigh(极高 320K)→ high:常规有损音轨的最高档,在「无损之上还有
+      Hi-Res/杜比」的完整阶梯里属中档,且 320K 落在 high 档 180–500kbps 区间;
+    - lossless(无损 FLAC)→ lossless:该偏好的选轨分支会命中 Hi-Res/FLAC
+      无损流(即 B站事实上的最高音质),不满足时自动降级,无需在这里展开;
+      刻意不映射 dolby——杜比是环绕声制式而非「更高音质」的通用诉求。
+    未知/空档位回退 high(与 BiliClient.DEFAULT_AUDIO_QUALITY 一致)。
+    """
+    normalized = netease_quality.strip().lower()
+    return _NETEASE_TO_BILI_QUALITY_KEY.get(normalized, BiliQuality.HIGH.key)
+
+
 def bili_quality_degrade_chain(from_quality: BiliQuality) -> list[BiliQuality]:
     """对应 BiliQuality.degradeChain:从当前到更低的一条降级链。"""
     try:

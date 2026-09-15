@@ -151,7 +151,40 @@ QSplitter::handle:hover {
     background: @primary;
 }
 
-/* ---- 侧栏(QListWidget 同时服务队列窗口列表) --------------------------- */
+/* ---- 侧栏 --------------------------------------------------------------- */
+/* 树(M5 平台分区):条目样式与列表等价;加载占位为 NoItemFlags,走 :disabled */
+/* 分支区保持透明:rootIsDecorated 已关,此条兜底防止个别样式在子节点
+   缩进区绘制背景,把条目圆角色块左侧补出一截异色 */
+QTreeWidget {
+    background: transparent;
+    border: none;
+    outline: none;
+    font-size: 13px;
+}
+QTreeWidget::branch {
+    background: transparent;
+}
+QTreeWidget::item {
+    height: 36px;
+    border-radius: 18px;
+    margin: 1px 8px;
+    padding: 0 12px;
+    color: @onSurfaceVariant;
+}
+QTreeWidget::item:hover {
+    background: @surfaceContainer;
+    color: @onSurface;
+}
+QTreeWidget::item:selected {
+    background: @secondaryContainer;
+    color: @onSecondaryContainer;
+}
+QTreeWidget::item:disabled {
+    color: @outline;
+    font-size: 11px;
+}
+
+/* 队列窗口列表沿用 QListWidget */
 QListWidget {
     background: transparent;
     border: none;

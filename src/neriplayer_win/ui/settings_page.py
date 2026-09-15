@@ -1,8 +1,10 @@
-"""设置页(M3 最小实现 + M4 外观/关于):关闭行为 / 播放模式 / 外观 / 关于。
+"""设置页(M3 最小实现 + M4 外观/关于 + M5 音质偏好):
+关闭行为 / 播放 / 音质 / 外观 / 关于。
 
-前两组只做控件,改动即时发信号给 MainWindow(由其持久化到 settings.json
+控件组只做控件,改动即时发信号给 MainWindow(由其持久化到 settings.json
 并应用);程序化回填(set_xxx)时屏蔽信号避免回环。M4 增加外观(暗色/
 亮色,信号同样交 MainWindow 切主题)与关于(版本 / GPL-3.0 / 上游标注)。
+M5 增加音质偏好(网易云档位键,B站侧解析时换算),默认无损保持既有行为。
 """
 
 from __future__ import annotations
@@ -32,6 +34,13 @@ _APPEARANCE_ITEMS = [
     ("暗色", "dark"),
     ("亮色", "light"),
 ]
+# 音质偏好取网易云档位键(与 data.store._VALID_PLAY_QUALITIES 对齐),
+# 默认 lossless;B站播放时由 selector 换算成对应的 B站偏好键
+_QUALITY_ITEMS = [
+    ("无损 FLAC", "lossless"),
+    ("极高 320K", "exhigh"),
+    ("标准 128K", "standard"),
+]
 
 _UPSTREAM_URL = "https://github.com/cwuom/NeriPlayer"
 
@@ -42,6 +51,7 @@ class SettingsPage(QWidget):
     close_action_changed = Signal(str)
     play_mode_changed = Signal(str)
     appearance_changed = Signal(str)  # "dark" | "light"
+    quality_changed = Signal(str)  # "lossless" | "exhigh" | "standard"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -63,6 +73,15 @@ class SettingsPage(QWidget):
         mode_layout.addWidget(QLabel("播放模式:"))
         mode_layout.addWidget(self.mode_combo)
         mode_layout.addStretch(1)
+
+        quality_group = QGroupBox("音质")
+        self.quality_combo = QComboBox()
+        for label, value in _QUALITY_ITEMS:
+            self.quality_combo.addItem(label, userData=value)
+        quality_layout = QHBoxLayout(quality_group)
+        quality_layout.addWidget(QLabel("音质偏好:"))
+        quality_layout.addWidget(self.quality_combo)
+        quality_layout.addStretch(1)
 
         appearance_group = QGroupBox("外观")
         self.appearance_combo = QComboBox()
@@ -94,6 +113,7 @@ class SettingsPage(QWidget):
         root.setAlignment(Qt.AlignmentFlag.AlignTop)
         root.addWidget(close_group)
         root.addWidget(mode_group)
+        root.addWidget(quality_group)
         root.addWidget(appearance_group)
         root.addWidget(about_group)
         root.addStretch(1)
@@ -102,6 +122,9 @@ class SettingsPage(QWidget):
         self.mode_combo.currentIndexChanged.connect(self._on_mode_index_changed)
         self.appearance_combo.currentIndexChanged.connect(
             self._on_appearance_index_changed
+        )
+        self.quality_combo.currentIndexChanged.connect(
+            self._on_quality_index_changed
         )
 
         # 默认勾选与持久化默认一致(close_action 默认 tray)
@@ -136,6 +159,11 @@ class SettingsPage(QWidget):
         if isinstance(value, str):
             self.appearance_changed.emit(value)
 
+    def _on_quality_index_changed(self, _index: int) -> None:
+        value = self.quality_combo.currentData()
+        if isinstance(value, str):
+            self.quality_changed.emit(value)
+
     # -- 程序化回填 ------------------------------------------------------------
 
     def set_close_action(self, action: str) -> None:
@@ -158,4 +186,12 @@ class SettingsPage(QWidget):
                 self.appearance_combo.blockSignals(True)
                 self.appearance_combo.setCurrentIndex(index)
                 self.appearance_combo.blockSignals(False)
+                return
+
+    def set_quality(self, quality: str) -> None:
+        for index in range(self.quality_combo.count()):
+            if self.quality_combo.itemData(index) == quality:
+                self.quality_combo.blockSignals(True)
+                self.quality_combo.setCurrentIndex(index)
+                self.quality_combo.blockSignals(False)
                 return

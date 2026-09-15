@@ -33,6 +33,7 @@ from .models import (
 )
 from .qr_login import BiliQrLoginClient
 from .selector import (
+    bili_quality_key_from_netease_level,
     prioritize_bili_stream_urls,
     select_stream_by_preference,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "BiliSong",
     "PlayOptions",
     "build_bili_stream_headers",
+    "bili_quality_key_from_netease_level",
     "ensure_https",
     "prioritize_bili_stream_urls",
     "select_stream_by_preference",
