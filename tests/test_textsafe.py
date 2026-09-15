@@ -22,23 +22,24 @@ class TestSanitizeWith:
     def _covered_ascii(ch: str) -> bool:
         return ord(ch) < 0x80
 
-    def test_uncovered_replaced_with_question(self):
-        assert sanitize_with("abc中", self._covered_ascii) == "abc?"
+    def test_uncovered_omitted(self):
+        # 未覆盖字符显示空白(静默省略),不用「?」(用户反馈:问号易困惑)
+        assert sanitize_with("abc中", self._covered_ascii) == "abc"
 
     def test_variant_selector_dropped(self):
-        # U+FE0F(变体选择符,Cf)直接丢弃,不留「?」
-        assert sanitize_with("a❤️b", self._covered_ascii) == "a?b"
+        # U+FE0F(变体选择符,Cf)直接丢弃
+        assert sanitize_with("a❤️b", self._covered_ascii) == "ab"
 
     def test_control_chars_dropped(self):
         assert sanitize_with("a\x00b\x1fc", self._covered_ascii) == "abc"
 
     def test_nfkc_rescues_compat_forms(self):
-        # 数学字母/带圈数字/全角归一成 ASCII 后即可保留,不再变「?」
+        # 数学字母/带圈数字/全角归一成 ASCII 后即可保留
         assert sanitize_with("𝕏①！", self._covered_ascii) == "X1!"
 
     def test_empty_and_all_unsafe_fallback(self):
         assert sanitize_with("", self._covered_ascii) == ""
-        assert sanitize_with("中中", self._covered_ascii) == "??"
+        assert sanitize_with("中中", self._covered_ascii) == "?"
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="GDI 字形探测仅 Windows")
@@ -55,19 +56,18 @@ class TestSanitizeUiText:
         assert sanitize_ui_text("ⅫⅣ") == "XIIIV"
         assert sanitize_ui_text("九…") == "九..."
 
-    def test_missing_glyphs_replaced(self, qapp):
+    def test_missing_glyphs_omitted(self, qapp):
         # ❤(U+2764)/♪(U+266A)/泰文与阿拉伯-印度数字均不在雅黑字形集内
         result = sanitize_ui_text("❤️蒸気火鸡❤")
-        assert "❤" not in result
-        assert "?" in result
-        assert "蒸" in result  # 覆盖字符原样保留
+        assert result == "蒸気火鸡"
+        assert "?" not in result  # 未覆盖字符静默省略,不显示问号
         result = sanitize_ui_text("٩(๑)۶♪")
-        assert "٩" not in result and "♪" not in result
+        assert result == "()"
 
-    def test_non_bmp_replaced(self, qapp):
+    def test_non_bmp_omitted(self, qapp):
         # emoji(U+1F60A)与数学字母(U+1D54F):非 BMP 一律视为未覆盖
         result = sanitize_ui_text("𝕏𝟚😊")
-        assert result == "X2?"  # 𝕏/𝟚 先经 NFKC 救回,😊 替换
+        assert result == "X2"  # 𝕏/𝟚 先经 NFKC 救回,😊 省略
 
     def test_fullwidth_rescued_by_nfkc(self, qapp):
         # 全角字母数字 NFKC 归一为半角(即使字体本身也覆盖全角形态)

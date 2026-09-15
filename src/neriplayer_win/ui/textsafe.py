@@ -13,7 +13,10 @@ v0.3.0 接入收藏歌单后,真实标题中的 ❤/٩/๑ 曾把登录态内存
 - 先 NFKC 归一(𝕏→X、①→1、全角→半角等兼容形式救回可读 ASCII);
 - 再按应用实际字体逐码点探测字形(GDI GetGlyphIndicesW +
   GGI_MARK_NONEXISTING_GLYPHS,结果按码点缓存);
-- 未覆盖码点替换为「?」,控制/格式字符(含 U+FE0F 变体选择符)丢弃;
+- 未覆盖码点与控制/格式字符(含 U+FE0F 变体选择符)一并省略——
+  显示空白比「?」更不突兀,问号会让用户以为标题损坏(2026-09-15
+  用户反馈);整体净化为空时以单个「?」兜底(空串在侧栏/表格里
+  不可辨认);
 - 非 BMP 字符(emoji/数学字母区)不经探测直接视为未覆盖——它们必然
   触发 Segoe UI Emoji / Cambria Math 回退。
 
@@ -42,7 +45,7 @@ _font_resolved = False
 
 
 def _is_droppable(ch: str) -> bool:
-    """控制/格式字符与变体选择符:纯展示提示,直接丢弃不留「?」。"""
+    """控制/格式字符与变体选择符:纯展示提示,无信息量,直接省略。"""
     if unicodedata.category(ch) in ("Cc", "Cf"):
         return True
     # U+FE00-FE0F 变体选择符类别是 Mn(组合记号),单独出现无意义
@@ -52,8 +55,8 @@ def _is_droppable(ch: str) -> bool:
 def sanitize_with(text: str, covered: Callable[[str], bool]) -> str:
     """净化核心(纯函数,便于单测):归一 + 逐字符按 covered() 过滤。
 
-    未覆盖 → 「?」;控制/格式字符与变体选择符直接丢弃;
-    净化后为空则至少返回一个「?」(空串在侧栏/表格里不可辨认)。
+    未覆盖字符与控制/格式字符/变体选择符一并省略(显示空白);
+    净化后为空则返回单个「?」兜底(空串在侧栏/表格里不可辨认)。
     """
     if not text:
         return text
@@ -61,7 +64,8 @@ def sanitize_with(text: str, covered: Callable[[str], bool]) -> str:
     for ch in unicodedata.normalize("NFKC", text):
         if _is_droppable(ch):
             continue
-        out.append(ch if covered(ch) else "?")
+        if covered(ch):
+            out.append(ch)
     return "".join(out) or "?"
 
 
