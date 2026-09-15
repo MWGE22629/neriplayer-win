@@ -65,6 +65,9 @@ FAV_FOLDER_CREATED_LIST_ALL = "https://api.bilibili.com/x/v3/fav/folder/created/
 FAV_FOLDER_CREATED_LIST = "https://api.bilibili.com/x/v3/fav/folder/created/list"
 FAV_RESOURCE_LIST = "https://api.bilibili.com/x/v3/fav/resource/list"
 PAGELIST_URL = "https://api.bilibili.com/x/player/pagelist"
+# 稍后再看(Web 端接口;参考实现无此端点,契约以 2026-09-15 本机登录态
+# 实测为准:GET + 登录 cookie,无需 WBI 签名,data.list 全量不分页)
+WATCH_LATER_URL = "https://api.bilibili.com/x/v2/history/toview/web"
 
 # 默认 UA (Web),对应 DEFAULT_WEB_UA
 DEFAULT_WEB_UA = (
@@ -591,6 +594,37 @@ def parse_fav_resource_page(data: Mapping[str, Any]) -> BiliFavFolderPage:
     )
 
 
+def parse_watch_later_response(root: Mapping[str, Any]) -> list[BiliFavItem]:
+    """稍后再看响应解析:data.list[] → BiliFavItem(保持接口顺序,最新在前)。
+
+    字段对照实测响应:aid/bvid/title/pic/duration/owner.mid/owner.name/
+    add_time;条目恒为视频稿件(type=2),复用 BiliFavItem 的 playable 语义。
+    """
+    data = root.get("data") if isinstance(root.get("data"), dict) else {}
+    lst = data.get("list") if isinstance(data.get("list"), list) else []
+    items: list[BiliFavItem] = []
+    for m in lst:
+        if not isinstance(m, dict):
+            continue
+        owner = m.get("owner") if isinstance(m.get("owner"), dict) else {}
+        bvid = _opt_str(m, "bvid").strip() or None
+        items.append(
+            BiliFavItem(
+                type=2,
+                id=_opt_long_or_none(m, "aid") or 0,
+                bvid=bvid,
+                title=_opt_str(m, "title"),
+                cover_url=ensure_https(_opt_str(m, "pic")),
+                intro="",
+                duration_sec=_opt_int(m, "duration", 0),
+                upper_mid=_opt_long_or_none(owner, "mid") or 0 if isinstance(owner, dict) else 0,
+                upper_name=_opt_str(owner, "name") if isinstance(owner, dict) else "",
+                fav_time=_opt_long_or_none(m, "add_time"),
+            )
+        )
+    return items
+
+
 def parse_page_list_response(root: Mapping[str, Any]) -> list[BiliVideoPage]:
     """对应 parsePageListResponse(data 为数组)。"""
     data = root.get("data") if isinstance(root.get("data"), list) else []
@@ -992,6 +1026,21 @@ class BiliClient:
                 seen.add(key)
                 out.append(item)
         return out
+
+    # -- 稍后再看(参考实现无此接口,契约见 WATCH_LATER_URL 注释) ----------
+
+    def get_watch_later_items(self) -> list[BiliFavItem]:
+        """稍后再看全部条目(接口全量返回,不分页;需登录态)。"""
+        root = self.get_json(WATCH_LATER_URL, {})
+        code = _opt_int(root, "code", -1)
+        if code != 0:
+            message = _opt_str(root, "message") or _opt_str(root, "msg")
+            if code == -101 or "登录" in message:
+                raise BiliAuthRequiredError(
+                    f"获取稍后再看失败: {message}(code={code})", code=code
+                )
+            raise BiliApiError(f"获取稍后再看失败: {message}(code={code})", code=code)
+        return parse_watch_later_response(root)
 
     # -- 视频基础信息(对应 wbi/view 与 pagelist) ------------------------------
 

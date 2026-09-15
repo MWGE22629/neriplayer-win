@@ -27,6 +27,7 @@ from neriplayer_win.api.bili.client import (
     parse_fav_resource_page,
     parse_page_list_response,
     parse_play_info,
+    parse_watch_later_response,
     put_common_play_params,
     should_retry_empty_audio_fetch,
     to_audio_stream_infos,
@@ -407,6 +408,47 @@ class TestFavParsing:
         pages = parse_page_list_response(root)
         assert [p.cid for p in pages] == [111, 222]
         assert pages[0].width == 16 and pages[1].width == 0
+
+
+class TestWatchLaterParsing:
+    """稍后再看响应解析(toview/web,契约见 client.WATCH_LATER_URL 注释)。"""
+
+    def test_parse_watch_later_list(self):
+        root = {
+            "code": 0,
+            "data": {
+                "list": [
+                    {
+                        "aid": 117241366448746,
+                        "bvid": "BV125Yt6GEDi",
+                        "title": "demo",
+                        "pic": "//i0.hdslb.com/bfs/archive/x.jpg",
+                        "duration": 687,
+                        "owner": {"mid": 7980111, "name": "UP主"},
+                        "add_time": 1757892000,
+                    },
+                    {"aid": 2, "bvid": " ", "title": "无bvid"},
+                    "garbage",
+                ]
+            },
+        }
+        items = parse_watch_later_response(root)
+        assert len(items) == 2
+        first: BiliFavItem = items[0]
+        # 条目恒为视频稿件:type=2 且有 bvid 即可播
+        assert first.type == 2 and first.playable
+        assert first.id == 117241366448746
+        assert first.bvid == "BV125Yt6GEDi"
+        assert first.duration_sec == 687
+        assert first.upper_mid == 7980111 and first.upper_name == "UP主"
+        assert first.fav_time == 1757892000
+        assert first.cover_url == "https://i0.hdslb.com/bfs/archive/x.jpg"
+        assert not items[1].playable  # bvid 空白视同缺失
+
+    def test_parse_watch_later_empty_or_malformed(self):
+        assert parse_watch_later_response({"code": 0, "data": {}}) == []
+        assert parse_watch_later_response({"code": 0, "data": {"list": []}}) == []
+        assert parse_watch_later_response({"code": 0}) == []
 
 
 # ---------------------------------------------------------------------------

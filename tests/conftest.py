@@ -17,10 +17,18 @@ import pytest
 
 @pytest.fixture(scope="session")
 def qapp():
-    """进程内共享的 QApplication(UI 层测试用;沿用已存在的实例)。"""
+    """进程内共享的 QApplication(UI 层测试用;沿用已存在的实例)。
+
+    离屏平台默认字体族是通用名 "Sans Serif",与真实 GUI(微软雅黑 UI)
+    的字形覆盖差异会误导 textsafe 的净化判定(以及任何字体相关断言),
+    这里统一设为系统默认 UI 字体,测试行为对齐真机。
+    """
+    from PySide6.QtGui import QFont
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
+    if app.font().family() in ("", "Sans Serif"):
+        app.setFont(QFont("Microsoft YaHei UI"))
     yield app
 
 

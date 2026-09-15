@@ -3,7 +3,9 @@
 逐字对照 reference/NeriPlayer-Android 翻译:
 
 - app/src/main/java/moe/ouom/neriplayer/core/api/netease/NeteaseClient.kt
-  (请求管线、cookie 合并、weapi/eapi/linuxapi 调用、歌单/歌曲/播放地址)
+  (请求管线、cookie 合并、weapi/eapi/linuxapi 调用、歌单/歌曲/播放地址;
+  歌单分流 created/subscribed 对照 getUserCreatedPlaylists /
+  getUserSubscribedPlaylists)
 - app/src/main/java/moe/ouom/neriplayer/core/api/netease/NeteaseQrLoginClient.kt
   (扫码登录:unikey 申请、二维码内容、轮询、803 后的 cookie 校验)
 - app/src/main/java/moe/ouom/neriplayer/core/player/resolver/netease/
@@ -44,6 +46,7 @@ from .models import (
     NeteaseNoPlayUrlError,
     NeteasePlaylist,
     NeteaseSong,
+    NeteaseUserPlaylists,
     NeteaseYdSnapshot,
     PlayableUrl,
     QrLoginCheckResult,
@@ -264,6 +267,56 @@ def _parse_song_item(track: Mapping[str, Any]) -> NeteaseSong | None:
         duration_ms=duration_ms,
         cover_url=cover_url,
     )
+
+
+def split_user_playlists(items: Any, user_id: int) -> NeteaseUserPlaylists:
+    """user/playlist 的 playlist 数组按归属分流(模块级纯函数,便于单测)。
+
+    created 过滤规则对应 getUserCreatedPlaylists(creatorId==uid 或未订阅),
+    「我喜欢的音乐」置前并打 is_liked;其余(subscribed==true 且 creator
+    !=uid)归入 subscribed,对应 getUserSubscribedPlaylists 的语义——
+    Kotlin 版两个过滤器独立调用时理论上会把「自己创建且已订阅」的歌单
+    双算,此处按并集划分保证条目不重复。
+    """
+    liked: NeteasePlaylist | None = None
+    created: list[NeteasePlaylist] = []
+    subscribed: list[NeteasePlaylist] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        creator = item.get("creator") or {}
+        creator_id = creator.get("userId") or -1
+        is_subscribed = bool(item.get("subscribed", False))
+        playlist = NeteasePlaylist(
+            id=int(item.get("id") or 0),
+            name=str(item.get("name") or ""),
+            track_count=int(item.get("trackCount") or 0),
+            special_type=int(item.get("specialType") or 0),
+        )
+        if creator_id == user_id or not is_subscribed:
+            is_liked = creator_id == user_id and (
+                playlist.special_type == 5 or "我喜欢的音乐" in playlist.name
+            )
+            if is_liked and liked is None:
+                liked = NeteasePlaylist(
+                    id=playlist.id,
+                    name="我喜欢的音乐",
+                    track_count=playlist.track_count,
+                    special_type=playlist.special_type,
+                    is_liked=True,
+                )
+            elif is_liked:
+                # 后续同名特殊歌单不再重复(与 getLikedPlaylistId 的 break 语义一致)
+                continue
+            else:
+                created.append(playlist)
+        else:
+            subscribed.append(playlist)
+    ordered: list[NeteasePlaylist] = []
+    if liked is not None:
+        ordered.append(liked)
+    ordered.extend(created)
+    return NeteaseUserPlaylists(created=ordered, subscribed=subscribed)
 
 
 # ---------------------------------------------------------------------------
@@ -631,53 +684,21 @@ class NeteaseClient:
             True,
         )
 
-    def get_user_playlists(self, user_id: int, limit: int = 1000) -> list[NeteasePlaylist]:
-        """用户歌单列表;「我喜欢的音乐」置前并打 is_liked 标记。
+    def get_user_playlists_grouped(self, user_id: int, limit: int = 1000) -> NeteaseUserPlaylists:
+        """用户歌单按归属分流:created(liked 置前)+ subscribed(收藏的他人歌单)。
 
-        过滤规则对应 getUserCreatedPlaylists(creatorId==uid 或未订阅)。
+        对应 getUserCreatedPlaylists / getUserSubscribedPlaylists 共用的
+        getUserPlaylists 响应,一次请求两份视图。
         """
         raw = self.get_user_playlists_raw(user_id, 0, limit)
         root = json.loads(raw)
         if root.get("code", 200) != 200:
             raise NeteaseApiError(f"获取歌单列表失败: code={root.get('code')}")
-        playlists = root.get("playlist") or []
-        liked: NeteasePlaylist | None = None
-        created: list[NeteasePlaylist] = []
-        for item in playlists:
-            if not isinstance(item, dict):
-                continue
-            creator = item.get("creator") or {}
-            creator_id = creator.get("userId") or -1
-            subscribed = bool(item.get("subscribed", False))
-            if not (creator_id == user_id or not subscribed):
-                continue
-            playlist = NeteasePlaylist(
-                id=int(item.get("id") or 0),
-                name=str(item.get("name") or ""),
-                track_count=int(item.get("trackCount") or 0),
-                special_type=int(item.get("specialType") or 0),
-            )
-            is_liked = creator_id == user_id and (
-                playlist.special_type == 5 or "我喜欢的音乐" in playlist.name
-            )
-            if is_liked and liked is None:
-                liked = NeteasePlaylist(
-                    id=playlist.id,
-                    name="我喜欢的音乐",
-                    track_count=playlist.track_count,
-                    special_type=playlist.special_type,
-                    is_liked=True,
-                )
-            elif is_liked:
-                # 后续同名特殊歌单不再重复(与 getLikedPlaylistId 的 break 语义一致)
-                continue
-            else:
-                created.append(playlist)
-        result: list[NeteasePlaylist] = []
-        if liked is not None:
-            result.append(liked)
-        result.extend(created)
-        return result
+        return split_user_playlists(root.get("playlist") or [], user_id)
+
+    def get_user_playlists(self, user_id: int, limit: int = 1000) -> list[NeteasePlaylist]:
+        """用户自建歌单列表(getUserCreatedPlaylists 语义的兼容入口)。"""
+        return self.get_user_playlists_grouped(user_id, limit).created
 
     def get_liked_playlist_id(self, user_id: int) -> int | None:
         """对应 getLikedPlaylistId。"""

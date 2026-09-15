@@ -81,6 +81,20 @@ class NeteasePlaylist:
 
 
 @dataclass(frozen=True)
+class NeteaseUserPlaylists:
+    """用户歌单按归属分流(user/playlist 响应一次解析的两份视图)。
+
+    created: 「我喜欢的音乐」置前 + 自建歌单(creator==uid 或未订阅);
+    subscribed: 收藏的他人歌单(subscribed==true 且 creator!=uid)。
+    对应 Kotlin getUserCreatedPlaylists / getUserSubscribedPlaylists;
+    两过滤器的并集划分,条目不会重复落侧。
+    """
+
+    created: list[NeteasePlaylist] = field(default_factory=list)
+    subscribed: list[NeteasePlaylist] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class NeteaseSong:
     id: int
     title: str

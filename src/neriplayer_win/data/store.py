@@ -34,15 +34,17 @@ _SETTINGS_FILE = "settings.json"
 # M5 增加 play_quality:播放音质偏好,取网易云档位键(standard/exhigh/
 # lossless,B站侧由 selector 的映射函数换算);默认 lossless 保持既有行为。
 # M5 增加侧栏树状态:sidebar_expanded 记录平台分区折叠状态
-# ({"netease": bool, "bili": bool},默认全展开);netease_playlist_order /
-# bili_folder_order 记录分区内拖拽排序后的条目 id 顺序(加载时按存储序
-# 重排,新条目追加尾部,存储里已失效的 id 在重排时静默清掉)。
+# ({"netease": bool, "netease-subscribed": bool, "bili": bool},默认全展开);
+# netease_playlist_order / netease_subscribed_order / bili_folder_order
+# 记录分区内拖拽排序后的条目 id 顺序(加载时按存储序重排,新条目追加尾部,
+# 存储里已失效的 id 在重排时静默清掉)。
 SETTING_CLOSE_ACTION = "close_action"
 SETTING_PLAY_MODE = "play_mode"
 SETTING_APPEARANCE = "appearance"
 SETTING_PLAY_QUALITY = "play_quality"
 SETTING_SIDEBAR_EXPANDED = "sidebar_expanded"
 SETTING_NETEASE_PLAYLIST_ORDER = "netease_playlist_order"
+SETTING_NETEASE_SUBSCRIBED_ORDER = "netease_subscribed_order"
 SETTING_BILI_FOLDER_ORDER = "bili_folder_order"
 DEFAULT_CLOSE_ACTION = "tray"
 DEFAULT_PLAY_MODE = "sequence"
@@ -52,8 +54,12 @@ _VALID_CLOSE_ACTIONS = ("exit", "tray")
 _VALID_PLAY_MODES = ("sequence", "shuffle", "repeat_one")
 _VALID_APPEARANCES = ("dark", "light")
 _VALID_PLAY_QUALITIES = ("standard", "exhigh", "lossless")
-_SIDEBAR_SECTIONS = ("netease", "bili")
-_SETTING_ID_ORDERS = (SETTING_NETEASE_PLAYLIST_ORDER, SETTING_BILI_FOLDER_ORDER)
+_SIDEBAR_SECTIONS = ("netease", "netease-subscribed", "bili")
+_SETTING_ID_ORDERS = (
+    SETTING_NETEASE_PLAYLIST_ORDER,
+    SETTING_NETEASE_SUBSCRIBED_ORDER,
+    SETTING_BILI_FOLDER_ORDER,
+)
 
 
 def default_settings() -> dict[str, Any]:
@@ -65,6 +71,7 @@ def default_settings() -> dict[str, Any]:
         SETTING_PLAY_QUALITY: DEFAULT_PLAY_QUALITY,
         SETTING_SIDEBAR_EXPANDED: {section: True for section in _SIDEBAR_SECTIONS},
         SETTING_NETEASE_PLAYLIST_ORDER: [],
+        SETTING_NETEASE_SUBSCRIBED_ORDER: [],
         SETTING_BILI_FOLDER_ORDER: [],
     }
 

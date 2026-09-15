@@ -22,8 +22,12 @@ from PySide6.QtGui import QDropEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem
 
-from neriplayer_win.api.bili import BiliAccount, BiliFavFolder
-from neriplayer_win.api.netease import NeteaseAccount, NeteasePlaylist
+from neriplayer_win.api.bili import BiliAccount, BiliFavFolder, BiliFavItem
+from neriplayer_win.api.netease import (
+    NeteaseAccount,
+    NeteasePlaylist,
+    NeteaseUserPlaylists,
+)
 from neriplayer_win.player.queue import BackupUrlRotator, PlayMode, QueueSong
 from neriplayer_win.ui import main_window as main_window_module
 from neriplayer_win.ui.main_window import (
@@ -113,8 +117,11 @@ class TestSidebarTreeStructure:
 
             window._bili_account = BiliAccount(mid=42, uname="测试")
             window._rebuild_sidebar()
-            bili = window.sidebar.topLevelItem(1)
-            assert bili.child(0).text(0) == "收藏夹加载中…"
+            # 登录网易云后四分区:歌单 / 收藏 / B站 / 设置
+            bili = window.sidebar.topLevelItem(2)
+            # 稍后再看固定首位,收藏夹加载占位其后
+            assert bili.child(0).data(0, _ROLE) == ("bili-watchlater", None)
+            assert bili.child(1).text(0) == "收藏夹加载中…"
         finally:
             _close(window)
 
@@ -165,11 +172,15 @@ class TestSidebarCollapse:
             )
             qapp.processEvents()
             assert header.isExpanded() is False
-            # 折叠状态落盘
+            # 折叠状态落盘(未登录时「网易云·收藏」分区不出现,保持默认展开)
             data = json.loads(
                 (tmp_path / "settings.json").read_text(encoding="utf-8")
             )
-            assert data["sidebar_expanded"] == {"netease": False, "bili": True}
+            assert data["sidebar_expanded"] == {
+                "netease": False,
+                "netease-subscribed": True,
+                "bili": True,
+            }
             # 全量重建后重新应用收起状态(不回弹)
             window._rebuild_sidebar()
             assert tree.topLevelItem(0).isExpanded() is False
@@ -208,7 +219,9 @@ class TestStoredOrderApplied:
         window = _make_window(qapp, monkeypatch, tmp_path)
         try:
             window._account = NeteaseAccount(user_id=1, nickname="测试")
-            window._on_playlists_loaded(_netease_playlists(10, 20, 30))
+            window._on_playlists_loaded(
+                NeteaseUserPlaylists(created=_netease_playlists(10, 20, 30))
+            )
             header = window.sidebar.topLevelItem(0)
             roles = [
                 header.child(i).data(0, _ROLE) for i in range(header.childCount())
@@ -229,6 +242,39 @@ class TestStoredOrderApplied:
         finally:
             _close(window)
 
+    def test_subscribed_playlists_sorted_and_pruned(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        (tmp_path / "settings.json").write_text(
+            json.dumps({"netease_subscribed_order": [30, 99, 10]}),
+            encoding="utf-8",
+        )
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._account = NeteaseAccount(user_id=1, nickname="测试")
+            window._on_playlists_loaded(
+                NeteaseUserPlaylists(subscribed=_netease_playlists(10, 20, 30))
+            )
+            # 收藏分区是第二个顶层项
+            header = window.sidebar.topLevelItem(1)
+            assert header.data(0, _ROLE) == ("netease-subscribed-header", None)
+            roles = [
+                header.child(i).data(0, _ROLE) for i in range(header.childCount())
+            ]
+            assert roles == [
+                ("netease-subscribed-playlist", 30),
+                ("netease-subscribed-playlist", 10),
+                ("netease-subscribed-playlist", 20),
+            ]
+            data = json.loads(
+                (tmp_path / "settings.json").read_text(encoding="utf-8")
+            )
+            assert data["netease_subscribed_order"] == [30, 10, 20]
+            window._rebuild_sidebar()
+            assert window.sidebar.section_child_ids("netease-subscribed") == [30, 10, 20]
+        finally:
+            _close(window)
+
     def test_bili_folders_sorted(self, qapp, monkeypatch, tmp_path):
         (tmp_path / "settings.json").write_text(
             json.dumps({"bili_folder_order": [9, 1]}), encoding="utf-8"
@@ -237,13 +283,197 @@ class TestStoredOrderApplied:
         try:
             window._bili_account = BiliAccount(mid=42, uname="测试")
             window._on_bili_folders_loaded(
-                [
-                    BiliFavFolder(media_id=1, fid=1, mid=42, title="默认收藏夹"),
-                    BiliFavFolder(media_id=9, fid=9, mid=42, title="歌单收藏"),
-                    BiliFavFolder(media_id=5, fid=5, mid=42, title="新收藏"),
-                ]
+                (
+                    [
+                        BiliFavFolder(media_id=1, fid=1, mid=42, title="默认收藏夹"),
+                        BiliFavFolder(media_id=9, fid=9, mid=42, title="歌单收藏"),
+                        BiliFavFolder(media_id=5, fid=5, mid=42, title="新收藏"),
+                    ],
+                    4,  # 稍后再看条数
+                )
             )
             assert window.sidebar.section_child_ids("bili") == [9, 1, 5]
+        finally:
+            _close(window)
+
+
+# ---------------------------------------------------------------------------
+# 网易云收藏歌单分区 + B站稍后再看
+# ---------------------------------------------------------------------------
+
+
+class TestSubscribedSection:
+    """「网易云 · 收藏」:登录后与自建歌单并列;未登录整个分区不出现。"""
+
+    def test_subscribed_rendered_parallel_to_created(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._account = NeteaseAccount(user_id=1, nickname="测试")
+            window._on_playlists_loaded(
+                NeteaseUserPlaylists(
+                    created=_netease_playlists(1, 2),
+                    subscribed=[
+                        NeteasePlaylist(id=31, name="共享歌单", track_count=28),
+                        NeteasePlaylist(id=32, name="空收藏", track_count=0),
+                    ],
+                )
+            )
+            tree = window.sidebar
+            assert tree.topLevelItemCount() == 4
+            created, subscribed, _bili, _settings = (
+                tree.topLevelItem(i) for i in range(4)
+            )
+            assert created.data(0, _ROLE) == ("netease-header", None)
+            assert subscribed.data(0, _ROLE) == ("netease-subscribed-header", None)
+            assert subscribed.child(0).text(0) == "共享歌单(28)"
+            assert subscribed.child(0).data(0, _ROLE) == (
+                "netease-subscribed-playlist", 31,
+            )
+            # track_count 为 0 不追加计数
+            assert subscribed.child(1).text(0) == "空收藏"
+            # 分区独立折叠持久化
+            subscribed.setExpanded(False)
+            data = json.loads(
+                (tmp_path / "settings.json").read_text(encoding="utf-8")
+            )
+            assert data["sidebar_expanded"]["netease-subscribed"] is False
+        finally:
+            _close(window)
+
+    def test_empty_subscribed_shows_placeholder(self, qapp, monkeypatch, tmp_path):
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._account = NeteaseAccount(user_id=1, nickname="测试")
+            window._on_playlists_loaded(
+                NeteaseUserPlaylists(created=_netease_playlists(1))
+            )
+            subscribed = window.sidebar.topLevelItem(1)
+            assert subscribed.childCount() == 1
+            child = subscribed.child(0)
+            assert child.text(0) == "收藏加载中…"
+            assert child.data(0, _ROLE) == ("netease-subscribed-loading", None)
+            assert not child.flags() & Qt.ItemFlag.ItemIsSelectable
+        finally:
+            _close(window)
+
+    def test_stale_login_clears_subscribed(self, qapp, monkeypatch, tmp_path):
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._account = NeteaseAccount(user_id=1, nickname="测试")
+            window._on_playlists_loaded(
+                NeteaseUserPlaylists(subscribed=_netease_playlists(5))
+            )
+            window._handle_stale_login("登录已过期")
+            assert window._subscribed_playlists == []
+            # 未登录:分区消失,顶层回到三项
+            assert window.sidebar.topLevelItemCount() == 3
+        finally:
+            _close(window)
+
+    def test_subscribed_playlist_click_starts_load(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._account = NeteaseAccount(user_id=1, nickname="测试")
+            window._on_playlists_loaded(
+                NeteaseUserPlaylists(subscribed=_netease_playlists(31))
+            )
+            item = window.sidebar.topLevelItem(1).child(0)
+            window._on_sidebar_item_clicked(item, 0)
+            assert window.central_stack.currentIndex() == 1  # 切到歌曲表页
+            assert len(scheduled) == 1  # 后台加载歌曲,UI 线程零网络
+            assert "正在加载" in window.statusBar().currentMessage()
+        finally:
+            _close(window)
+
+
+class TestBiliWatchLater:
+    """「稍后再看」:B站登录后固定在收藏夹分区首位,不参与拖拽排序。"""
+
+    def test_watchlater_first_child_with_count(self, qapp, monkeypatch, tmp_path):
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._bili_account = BiliAccount(mid=42, uname="测试")
+            window._on_bili_folders_loaded(
+                (
+                    [BiliFavFolder(media_id=9, fid=9, mid=42, title="默认收藏夹")],
+                    7,
+                )
+            )
+            header = window.sidebar.find_header("bili")
+            first = header.child(0)
+            assert first.text(0) == "稍后再看(7)"
+            assert first.data(0, _ROLE) == ("bili-watchlater", None)
+            # 不参与排序:顺序持久化只读收藏夹条目
+            assert window.sidebar.section_child_ids("bili") == [9]
+        finally:
+            _close(window)
+
+    def test_watchlater_count_pending_shows_plain_title(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._bili_account = BiliAccount(mid=42, uname="测试")
+            window._rebuild_sidebar()
+            first = window.sidebar.find_header("bili").child(0)
+            assert first.text(0) == "稍后再看"
+        finally:
+            _close(window)
+
+    def test_watchlater_click_loads_items(self, qapp, monkeypatch, tmp_path):
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._bili_account = BiliAccount(mid=42, uname="测试")
+            window._rebuild_sidebar()
+            monkeypatch.setattr(
+                window._bili_client,
+                "get_watch_later_items",
+                lambda: [
+                    BiliFavItem(
+                        type=2, id=1, bvid="BV1", title="视频A",
+                        duration_sec=60, upper_name="UP",
+                    ),
+                    BiliFavItem(
+                        type=21, id=2, bvid=None, title="合集B",
+                        duration_sec=30, upper_name="UP",
+                    ),
+                ],
+            )
+            item = window.sidebar.find_header("bili").child(0)
+            window._on_sidebar_item_clicked(item, 0)
+            assert window.central_stack.currentIndex() == 1
+            assert len(scheduled) == 1
+            fetch, on_done, _on_error = scheduled[0]
+            on_done(fetch())
+            # 不可播条目(无 bvid)被跳过
+            assert window.song_table.rowCount() == 1
+            assert window._queue.items()[0].title == "视频A"
+            assert window._queue.items()[0].bvid == "BV1"
+            # 计数刷新并回写侧栏
+            assert window._bili_watchlater_count == 2
+            assert (
+                window.sidebar.find_header("bili").child(0).text(0)
+                == "稍后再看(2)"
+            )
+            assert "稍后再看" in window.statusBar().currentMessage()
+        finally:
+            _close(window)
+
+    def test_stale_login_resets_watchlater(self, qapp, monkeypatch, tmp_path):
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._bili_account = BiliAccount(mid=42, uname="测试")
+            window._bili_watchlater_count = 7
+            window._handle_bili_stale_login("B站登录已过期")
+            assert window._bili_watchlater_count is None
+            header = window.sidebar.find_header("bili")
+            assert header.child(0).data(0, _ROLE) == ("bili-login", None)
         finally:
             _close(window)
 
@@ -379,7 +609,9 @@ class TestSidebarDragPersists:
         window = _make_window(qapp, monkeypatch, tmp_path)
         try:
             window._account = NeteaseAccount(user_id=1, nickname="测试")
-            window._on_playlists_loaded(_netease_playlists(10, 20, 30))
+            window._on_playlists_loaded(
+                NeteaseUserPlaylists(created=_netease_playlists(10, 20, 30))
+            )
             tree = window.sidebar
             p10 = tree.topLevelItem(0).child(0)
             p30 = tree.topLevelItem(0).child(2)

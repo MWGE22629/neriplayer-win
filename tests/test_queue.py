@@ -472,7 +472,8 @@ class TestSettingsStore:
         store.save_settings({"close_action": "exit", "play_mode": "sequence", "junk": 1})
         raw = json.loads(store.settings_path.read_text(encoding="utf-8"))
         # M4 起新增 appearance、M5 起新增 play_quality / sidebar_expanded /
-        # netease_playlist_order / bili_folder_order 键;未知键始终被拒
+        # netease_playlist_order / netease_subscribed_order / bili_folder_order
+        # 键;未知键始终被拒
         assert set(raw) == {
             "close_action",
             "play_mode",
@@ -480,5 +481,6 @@ class TestSettingsStore:
             "play_quality",
             "sidebar_expanded",
             "netease_playlist_order",
+            "netease_subscribed_order",
             "bili_folder_order",
         }

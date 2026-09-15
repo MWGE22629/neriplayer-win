@@ -258,3 +258,50 @@ class TestCookieStore:
         store.seed_domain_cookies("music.163.com", {"A": "1"})
         store.save_from_response("https://music.163.com/", ["A=2; Path=/"])
         assert store.cookies_for_url("https://music.163.com/")["A"] == "2"
+
+
+class TestSplitUserPlaylists:
+    """user/playlist 分流:getUserCreatedPlaylists 与 getUserSubscribedPlaylists
+    语义的并集划分(条目不重复落侧),liked 置前。"""
+
+    @staticmethod
+    def _item(pid, name, creator_id, subscribed, special_type=0, count=1):
+        return {
+            "id": pid,
+            "name": name,
+            "trackCount": count,
+            "specialType": special_type,
+            "subscribed": subscribed,
+            "creator": {"userId": creator_id},
+        }
+
+    def test_partition_and_liked_first(self):
+        from neriplayer_win.api.netease import split_user_playlists
+
+        items = [
+            self._item(2, "自建", 1, False),
+            self._item(3, "收藏A", 9, True, count=7),
+            self._item(1, "我喜欢的音乐", 1, False, special_type=5, count=10),
+            self._item(4, "收藏B", 8, True, count=0),
+            "garbage",  # 非 dict 条目跳过
+            self._item(5, "自己创建且已订阅", 1, True),
+        ]
+        groups = split_user_playlists(items, user_id=1)
+        # created:liked 置前 + 自建(含「自己创建且已订阅」,归自建侧不重复)
+        assert [(p.id, p.is_liked) for p in groups.created] == [
+            (1, True), (2, False), (5, False),
+        ]
+        assert groups.created[0].name == "我喜欢的音乐"
+        # subscribed:仅他人创建且 subscribed==true
+        assert [(p.id, p.track_count) for p in groups.subscribed] == [(3, 7), (4, 0)]
+
+    def test_duplicate_liked_dropped(self):
+        from neriplayer_win.api.netease import split_user_playlists
+
+        items = [
+            self._item(1, "我喜欢的音乐", 1, False, special_type=5),
+            self._item(11, "我喜欢的音乐", 1, False, special_type=5),
+        ]
+        groups = split_user_playlists(items, user_id=1)
+        assert [p.id for p in groups.created] == [1]
+        assert groups.subscribed == []

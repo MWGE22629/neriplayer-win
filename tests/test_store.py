@@ -191,8 +191,11 @@ class TestLocalStoreSettings:
             "play_mode": "shuffle",
             "appearance": "light",
             "play_quality": "lossless",
-            "sidebar_expanded": {"netease": True, "bili": True},
+            "sidebar_expanded": {
+                "netease": True, "netease-subscribed": True, "bili": True,
+            },
             "netease_playlist_order": [],
+            "netease_subscribed_order": [],
             "bili_folder_order": [],
         }
 
@@ -222,18 +225,19 @@ class TestApplyStoredOrder:
 
 
 class TestSidebarExpandedSetting:
-    """M5 分区折叠状态:{"netease": bool, "bili": bool},默认全展开。"""
+    """M5 分区折叠状态:{"netease"/"netease-subscribed"/"bili": bool},默认全展开。"""
 
     def test_defaults(self, tmp_path, monkeypatch):
         store = make_store(tmp_path, monkeypatch)
         assert store.load_settings()["sidebar_expanded"] == {
             "netease": True,
+            "netease-subscribed": True,
             "bili": True,
         }
 
     def test_roundtrip(self, tmp_path, monkeypatch):
         store = make_store(tmp_path, monkeypatch)
-        flags = {"netease": False, "bili": True}
+        flags = {"netease": False, "netease-subscribed": True, "bili": False}
         assert store.save_settings({"sidebar_expanded": flags}) is True
         assert store.load_settings()["sidebar_expanded"] == flags
 
@@ -241,12 +245,16 @@ class TestSidebarExpandedSetting:
         store = make_store(tmp_path, monkeypatch)
         store.settings_path.parent.mkdir(parents=True, exist_ok=True)
         store.settings_path.write_text(
-            json.dumps({"sidebar_expanded": {"netease": "yes", "bili": False}}),
+            json.dumps(
+                {"sidebar_expanded": {"netease": "yes", "bili": False}}
+            ),
             encoding="utf-8",
         )
-        # netease 非 bool 逐键回落默认;bili 合法保留
+        # netease 非 bool 逐键回落默认;netease-subscribed 缺省回落默认;
+        # bili 合法保留
         assert store.load_settings()["sidebar_expanded"] == {
             "netease": True,
+            "netease-subscribed": True,
             "bili": False,
         }
 
@@ -258,6 +266,7 @@ class TestSidebarExpandedSetting:
         )
         assert store.load_settings()["sidebar_expanded"] == {
             "netease": True,
+            "netease-subscribed": True,
             "bili": True,
         }
 
@@ -269,6 +278,8 @@ class TestSectionOrderSettings:
         store = make_store(tmp_path, monkeypatch)
         assert store.save_settings({"netease_playlist_order": [30, 10, 20]}) is True
         assert store.load_settings()["netease_playlist_order"] == [30, 10, 20]
+        assert store.save_settings({"netease_subscribed_order": [31, 32]}) is True
+        assert store.load_settings()["netease_subscribed_order"] == [31, 32]
         assert store.save_settings({"bili_folder_order": [9, 8]}) is True
         assert store.load_settings()["bili_folder_order"] == [9, 8]
 

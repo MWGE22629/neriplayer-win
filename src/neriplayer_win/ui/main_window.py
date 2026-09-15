@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from ..api.bili import (
     BiliAccount,
+    BiliApiError,
     BiliAudioStreamInfo,
     BiliAuthRequiredError,
     BiliClient,
@@ -39,11 +40,13 @@ from ..api.netease import (
     NeteaseClient,
     NeteasePlaylist,
     NeteaseSong,
+    NeteaseUserPlaylists,
 )
 from ..data.store import (
     SETTING_APPEARANCE,
     SETTING_BILI_FOLDER_ORDER,
     SETTING_NETEASE_PLAYLIST_ORDER,
+    SETTING_NETEASE_SUBSCRIBED_ORDER,
     SETTING_PLAY_QUALITY,
     SETTING_SIDEBAR_EXPANDED,
     LocalStore,
@@ -60,6 +63,7 @@ from .player_bar import PlayerBar, format_seconds
 from .queue_window import QueueWindow
 from .settings_page import SettingsPage
 from .theme import ThemeManager
+from .textsafe import sanitize_ui_text
 from .tray import TrayController
 from .workers import run_async
 
@@ -86,7 +90,11 @@ _FAIL_SKIP_DELAY_MS = 1000
 _PREFETCH_TTL_S = 10 * 60.0
 
 # 侧栏分区头 kind → 分区键(折叠状态与排序持久化共用)
-_HEADER_SECTION = {"netease-header": "netease", "bili-header": "bili"}
+_HEADER_SECTION = {
+    "netease-header": "netease",
+    "netease-subscribed-header": "netease-subscribed",
+    "bili-header": "bili",
+}
 
 # M5 实际生效音质展示:网易云 level → 状态栏中文(覆盖 QUALITY_FALLBACK_ORDER
 # 全集;未识别的新档位原样显示,避免把官方新增档位吞成「未知」)
@@ -125,9 +133,12 @@ def _bili_quality_suffix(stream: BiliAudioStreamInfo) -> str:
 
 
 def _netease_song_to_queue(song: NeteaseSong) -> QueueSong:
+    # 标题/歌手净化:第三方文本可能含主字体不覆盖的字符,任一命中都会
+    # 触发 DirectWrite 回退字体(+45~50MB,见 docs/PERF.md);队列标题
+    # 会流向歌曲表/播放条/状态栏/托盘,在这一处净化即全覆盖
     return QueueSong(
-        source="netease", id=song.id, bvid="", title=song.title,
-        artist=song.artist, duration_ms=song.duration_ms,
+        source="netease", id=song.id, bvid="", title=sanitize_ui_text(song.title),
+        artist=sanitize_ui_text(song.artist), duration_ms=song.duration_ms,
         cover_url=song.cover_url,
     )
 
@@ -135,8 +146,9 @@ def _netease_song_to_queue(song: NeteaseSong) -> QueueSong:
 def _bili_item_to_queue(avid: int, bvid: str, title: str, upper: str, duration_sec: int,
                         cover_url: str = "") -> QueueSong:
     return QueueSong(
-        source="bili", id=avid, bvid=bvid, title=title, artist=upper,
-        duration_ms=duration_sec * 1000, cover_url=cover_url,
+        source="bili", id=avid, bvid=bvid, title=sanitize_ui_text(title),
+        artist=sanitize_ui_text(upper), duration_ms=duration_sec * 1000,
+        cover_url=cover_url,
     )
 
 
@@ -204,19 +216,24 @@ class _EmptyStateView(QWidget):
 
 
 class _SidebarTree(QTreeWidget):
-    """侧栏树(M5):三分区顶层项(网易云/B站/设置)+ 分区内子节点。
+    """侧栏树(M5):四分区顶层项(网易云歌单/网易云收藏/B站/设置)+ 分区内子节点。
 
     拖拽排序做硬约束:只允许「同一分区内」的子节点(歌单/收藏夹)移动。
     dropEvent 不交给 Qt 默认实现(默认会把子节点挂成目标节点的子节点,
     产生意外嵌套),而是手动搬移;合法移动后发 order_changed(分区键),
     由 MainWindow 读子节点顺序落库。拖到顶层项(含分区头与「设置」)、
-    跨分区、空白处,或试图拖动顶层项/登录占位时直接 ignore,不落库。
+    跨分区、空白处,或试图拖动顶层项/登录占位/固定项(稍后再看)时直接
+    ignore,不落库。
     """
 
-    order_changed = Signal(str)  # 分区键 "netease" | "bili"
+    order_changed = Signal(str)  # 分区键 "netease" | "netease-subscribed" | "bili"
 
     # 可参与排序的子节点 kind(分区键 → 子节点 kind)
-    _SECTION_CHILD_KIND = {"netease": "netease-playlist", "bili": "bili-folder"}
+    _SECTION_CHILD_KIND = {
+        "netease": "netease-playlist",
+        "netease-subscribed": "netease-subscribed-playlist",
+        "bili": "bili-folder",
+    }
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -328,7 +345,8 @@ class _SidebarTree(QTreeWidget):
 
 
 class MainWindow(QMainWindow):
-    """主窗口:左侧导航(网易云歌单 + B站收藏夹)+ 歌曲列表 + 播放条。
+    """主窗口:左侧导航(网易云自建/收藏歌单 + B站收藏夹/稍后再看)
+    + 歌曲列表 + 播放条。
 
     播放队列 self._queue 持有统一条目(来源标记 netease/bili),双击列表、
     队列窗口切跳与自动接播都经 _play_at 按条目来源分发解析,两平台共用
@@ -350,10 +368,14 @@ class MainWindow(QMainWindow):
         self._client = NeteaseClient()
         self._account: NeteaseAccount | None = None
         self._playlists: list[NeteasePlaylist] = []
+        # 收藏的他人歌单(user/playlist 响应按 subscribed 分流的另一份视图)
+        self._subscribed_playlists: list[NeteasePlaylist] = []
 
         self._bili_client = BiliClient()
         self._bili_account: BiliAccount | None = None
         self._bili_folders: list[BiliFavFolder] = []
+        # 稍后再看条数(None=未加载,侧栏条目不显示计数)
+        self._bili_watchlater_count: int | None = None
 
         self._queue = PlayQueue(mode=PlayMode(self._settings.get("play_mode", "sequence")))
         # 解析代际:每次进入 _play_at 自增,旧代际的解析回调一律作废。
@@ -561,6 +583,7 @@ class MainWindow(QMainWindow):
         self._client.logout()
         self._account = None
         self._playlists = []
+        self._subscribed_playlists = []
         self._queue.replace([])
         self._rebuild_sidebar()
         self.central_stack.setCurrentIndex(_PAGE_LOGIN)
@@ -612,6 +635,7 @@ class MainWindow(QMainWindow):
         self._bili_client.logout()
         self._bili_account = None
         self._bili_folders = []
+        self._bili_watchlater_count = None
         self._rebuild_sidebar()
         self.statusBar().showMessage(message)
 
@@ -644,7 +668,7 @@ class MainWindow(QMainWindow):
             return
 
         def fetch() -> object:
-            return self._client.get_user_playlists(account.user_id)
+            return self._client.get_user_playlists_grouped(account.user_id)
 
         run_async(
             fetch,
@@ -654,12 +678,15 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _on_playlists_loaded(self, playlists) -> None:
-        if not isinstance(playlists, list):
+    def _on_playlists_loaded(self, groups) -> None:
+        if not isinstance(groups, NeteaseUserPlaylists):
             return
         # 套用拖拽排序的存储顺序:已知歌单按存储序排前,新歌单追加尾部
         self._playlists = self._apply_stored_order(
-            playlists, SETTING_NETEASE_PLAYLIST_ORDER, lambda p: p.id
+            groups.created, SETTING_NETEASE_PLAYLIST_ORDER, lambda p: p.id
+        )
+        self._subscribed_playlists = self._apply_stored_order(
+            groups.subscribed, SETTING_NETEASE_SUBSCRIBED_ORDER, lambda p: p.id
         )
         self._rebuild_sidebar()
 
@@ -693,7 +720,16 @@ class MainWindow(QMainWindow):
             return
 
         def fetch() -> object:
-            return self._bili_client.get_user_created_fav_folders(account.mid)
+            folders = self._bili_client.get_user_created_fav_folders(account.mid)
+            # 顺手拉一次稍后再看条数(接口全量返回,count 顺带可得);
+            # 失败只影响侧栏计数显示,不影响收藏夹本体
+            try:
+                watchlater_count: int | None = len(
+                    self._bili_client.get_watch_later_items()
+                )
+            except BiliApiError:
+                watchlater_count = None
+            return (folders, watchlater_count)
 
         run_async(
             fetch,
@@ -703,15 +739,36 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _on_bili_folders_loaded(self, folders) -> None:
+    def _on_bili_folders_loaded(self, result) -> None:
+        folders, watchlater_count = result
         if not isinstance(folders, list):
             return
+        self._bili_watchlater_count = watchlater_count
         # 套用拖拽排序的存储顺序:已知收藏夹按存储序排前,新收藏夹追加尾部
         self._bili_folders = self._apply_stored_order(
             folders, SETTING_BILI_FOLDER_ORDER, lambda f: f.media_id
         )
         self._rebuild_sidebar()
         self.statusBar().showMessage(f"B站收藏夹 · 共 {len(folders)} 个")
+
+    def _show_bili_items(self, items: list, title: str) -> None:
+        """B站条目列表(收藏夹/稍后再看共用)填表入队并提示。"""
+        playable = [item for item in items if item.playable]
+        self._table_header = _HEADER_BILI
+        # 切换列表即重置队列(保留既有行为)
+        self._queue.replace(
+            [
+                _bili_item_to_queue(
+                    item.id, item.bvid or "", item.title or "", item.upper_name,
+                    item.duration_sec, item.cover_url,
+                )
+                for item in playable
+            ]
+        )
+        self._fill_song_table()
+        skipped = len(items) - len(playable)
+        suffix = f"(跳过 {skipped} 条不可播内容)" if skipped else ""
+        self.statusBar().showMessage(f"{title} · 共 {len(playable)} 首{suffix}")
 
     def _load_bili_folder_tracks(self, media_id: int, title: str) -> None:
         self.song_table.setRowCount(0)
@@ -724,25 +781,31 @@ class MainWindow(QMainWindow):
         def on_done(items) -> None:
             if not isinstance(items, list):
                 return
-            playable = [item for item in items if item.playable]
-            self._table_header = _HEADER_BILI
-            # 切换收藏夹即重置队列(保留既有行为)
-            self._queue.replace(
-                [
-                    _bili_item_to_queue(
-                        item.id, item.bvid or "", item.title or "", item.upper_name,
-                        item.duration_sec, item.cover_url,
-                    )
-                    for item in playable
-                ]
-            )
-            self._fill_song_table()
-            skipped = len(items) - len(playable)
-            suffix = f"(跳过 {skipped} 条不可播内容)" if skipped else ""
-            self.statusBar().showMessage(f"{title} · 共 {len(playable)} 首{suffix}")
+            self._show_bili_items(items, title)
 
         def on_error(message: str) -> None:
             self.statusBar().showMessage(f"加载收藏夹失败:{message}")
+
+        run_async(fetch, on_done=on_done, on_error=on_error)
+
+    def _load_bili_watch_later(self, title: str) -> None:
+        self.song_table.setRowCount(0)
+        self._update_table_empty_state()
+        self.statusBar().showMessage(f"正在加载:{title}")
+
+        def fetch() -> object:
+            return self._bili_client.get_watch_later_items()
+
+        def on_done(items) -> None:
+            if not isinstance(items, list):
+                return
+            # 稍后再看变化频繁:每次打开都刷新侧栏计数
+            self._bili_watchlater_count = len(items)
+            self._show_bili_items(items, title)
+            self._rebuild_sidebar()
+
+        def on_error(message: str) -> None:
+            self.statusBar().showMessage(f"加载稍后再看失败:{message}")
 
         run_async(fetch, on_done=on_done, on_error=on_error)
 
@@ -801,7 +864,7 @@ class MainWindow(QMainWindow):
             self._add_child_item(netease_header, "扫码登录", "netease-login", None)
         else:
             for playlist in self._playlists:
-                title = playlist.name
+                title = sanitize_ui_text(playlist.name)
                 if playlist.track_count:
                     title = f"{title}({playlist.track_count})"
                 self._add_child_item(
@@ -813,14 +876,40 @@ class MainWindow(QMainWindow):
                     selectable=False,
                 )
 
+        # 收藏的他人歌单:仅网易云已登录时展示(未登录整个分区不出现)
+        if self._account is not None:
+            subscribed_header = self._add_header_item(
+                "网易云 · 收藏", self._brand_header_icon("netease"),
+                "netease-subscribed-header",
+            )
+            for playlist in self._subscribed_playlists:
+                title = sanitize_ui_text(playlist.name)
+                if playlist.track_count:
+                    title = f"{title}({playlist.track_count})"
+                self._add_child_item(
+                    subscribed_header, title, "netease-subscribed-playlist", playlist.id
+                )
+            if not self._subscribed_playlists:
+                self._add_child_item(
+                    subscribed_header, "收藏加载中…", "netease-subscribed-loading",
+                    None, selectable=False,
+                )
+
         bili_header = self._add_header_item(
             "B站 · 收藏夹", self._brand_header_icon("bilibili"), "bili-header"
         )
         if self._bili_account is None:
             self._add_child_item(bili_header, "未登录,点击登录", "bili-login", None)
         else:
+            # 稍后再看:固定首位,kind 不在可排序集合里(不参与拖拽排序)
+            watchlater_title = "稍后再看"
+            if self._bili_watchlater_count is not None:
+                watchlater_title += f"({self._bili_watchlater_count})"
+            self._add_child_item(
+                bili_header, watchlater_title, "bili-watchlater", None
+            )
             for folder in self._bili_folders:
-                title = folder.title
+                title = sanitize_ui_text(folder.title)
                 if folder.count:
                     title = f"{title}({folder.count})"
                 self._add_child_item(bili_header, title, "bili-folder", folder.media_id)
@@ -841,7 +930,11 @@ class MainWindow(QMainWindow):
         # 折叠三角徽标随 _apply_sidebar_icons 按展开态现算,无需另刷
         expanded = self._settings.get(SETTING_SIDEBAR_EXPANDED, {})
         netease_header.setExpanded(expanded.get("netease", True))
-        bili_header.setExpanded(expanded.get("bili", True))
+        for row in range(self.sidebar.topLevelItemCount()):
+            item = self.sidebar.topLevelItem(row)
+            section = _HEADER_SECTION.get(self.sidebar.item_kind(item))
+            if section is not None:
+                item.setExpanded(expanded.get(section, True))
         self.sidebar.blockSignals(False)
         self._apply_sidebar_icons()
 
@@ -849,11 +942,17 @@ class MainWindow(QMainWindow):
         "settings": "settings",
         "netease-login": "search",
         "netease-playlist": "library_music",
+        "netease-subscribed-playlist": "favorite",
         "bili-login": "person",
+        "bili-watchlater": "playlist_play",
         "bili-folder": "queue_music",
     }
 
-    _HEADER_BRAND = {"netease-header": "netease", "bili-header": "bilibili"}
+    _HEADER_BRAND = {
+        "netease-header": "netease",
+        "netease-subscribed-header": "netease",
+        "bili-header": "bilibili",
+    }
 
     def _apply_sidebar_icons(self) -> None:
         """按条目类型补单色图标;分区头品牌标按登录态取色(随主题/登录刷新)。"""
@@ -886,13 +985,18 @@ class MainWindow(QMainWindow):
         if kind == "netease-login":
             self.central_stack.setCurrentIndex(_PAGE_LOGIN)
             return
-        if kind == "netease-playlist":
+        if kind in ("netease-playlist", "netease-subscribed-playlist"):
+            # 自建与收藏歌单走同一展开/播放路径(歌单详情接口对两者一致)
             self.central_stack.setCurrentIndex(_PAGE_TABLE)
             self._load_playlist_tracks(int(payload), item.text(0))
             return
         if kind == "bili-folder":
             self.central_stack.setCurrentIndex(_PAGE_TABLE)
             self._load_bili_folder_tracks(int(payload), item.text(0))
+            return
+        if kind == "bili-watchlater":
+            self.central_stack.setCurrentIndex(_PAGE_TABLE)
+            self._load_bili_watch_later(item.text(0))
             return
         if kind == "bili-login":
             self.central_stack.setCurrentIndex(_PAGE_TABLE)
@@ -969,6 +1073,9 @@ class MainWindow(QMainWindow):
         if section == "netease":
             setting = SETTING_NETEASE_PLAYLIST_ORDER
             by_id = {p.id: p for p in self._playlists}
+        elif section == "netease-subscribed":
+            setting = SETTING_NETEASE_SUBSCRIBED_ORDER
+            by_id = {p.id: p for p in self._subscribed_playlists}
         else:
             setting = SETTING_BILI_FOLDER_ORDER
             by_id = {f.media_id: f for f in self._bili_folders}
@@ -979,6 +1086,8 @@ class MainWindow(QMainWindow):
             ordered = [by_id[i] for i in ids]
             if section == "netease":
                 self._playlists = ordered
+            elif section == "netease-subscribed":
+                self._subscribed_playlists = ordered
             else:
                 self._bili_folders = ordered
 

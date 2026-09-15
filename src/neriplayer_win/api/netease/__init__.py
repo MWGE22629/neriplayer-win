@@ -2,7 +2,7 @@
 
 职责:
 - 扫码登录与登录态维护(crypto + client)
-- 读取「我喜欢的音乐」与自建歌单
+- 读取「我喜欢的音乐」、自建歌单与收藏的他人歌单
 - 歌曲信息与播放地址解析
 
 请求参数/加密细节逐字对照 reference/NeriPlayer-Android 的 Kotlin 实现,
@@ -19,6 +19,7 @@ from .client import (
     merge_qr_credential_cookies,
     parse_playback_response,
     should_preheat_netease_weapi_session,
+    split_user_playlists,
 )
 from .models import (
     NeteaseAccount,
@@ -28,6 +29,7 @@ from .models import (
     NeteaseNoPlayUrlError,
     NeteasePlaylist,
     NeteaseSong,
+    NeteaseUserPlaylists,
     NeteaseYdSnapshot,
     PlayableUrl,
     QrLoginCheckResult,
@@ -46,6 +48,7 @@ __all__ = [
     "NeteaseNoPlayUrlError",
     "NeteasePlaylist",
     "NeteaseSong",
+    "NeteaseUserPlaylists",
     "NeteaseYdSnapshot",
     "PlayableUrl",
     "QrLoginCheckResult",
@@ -57,4 +60,5 @@ __all__ = [
     "merge_qr_credential_cookies",
     "parse_playback_response",
     "should_preheat_netease_weapi_session",
+    "split_user_playlists",
 ]
