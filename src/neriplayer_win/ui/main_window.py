@@ -1178,23 +1178,28 @@ class MainWindow(QMainWindow):
 
     def _section_header_icon(self, source: str, expanded: bool) -> QIcon:
         """分区头图标 = 品牌标(18px)+ 右侧折叠三角,合成在 30x18 画布。"""
-        return self._composite_header_icon(
-            self._brand_header_icon(source).pixmap(QSize(18, 18)), expanded
-        )
+        return self._composite_header_icon(self._brand_header_icon(source), expanded)
 
     def _monochrome_header_icon(self, icon_name: str, expanded: bool) -> QIcon:
         """无品牌标的分区头(「最近」):主题色单色标 + 折叠三角。"""
-        return self._composite_header_icon(
-            tinted_icon(icon_name).pixmap(QSize(18, 18)), expanded
-        )
+        return self._composite_header_icon(tinted_icon(icon_name), expanded)
 
-    @staticmethod
-    def _composite_header_icon(base: QPixmap, expanded: bool) -> QIcon:
-        canvas = QPixmap(30, 18)
+    # 分区头合成画布的设备像素比:2x 栅格化。高分屏(125%~200% 缩放)下
+    # DPR=1 的 30x18 画布会被拉伸 1.25~2 倍渲染,品牌标/三角发糊;
+    # 2x 覆盖到 200% 缩放仍为原生物理像素(更高缩放下也只轻微上采样)。
+    _HEADER_ICON_DPR = 2.0
+
+    @classmethod
+    def _composite_header_icon(cls, base_icon: QIcon, expanded: bool) -> QIcon:
+        dpr = cls._HEADER_ICON_DPR
+        canvas = QPixmap(int(30 * dpr), int(18 * dpr))
+        canvas.setDevicePixelRatio(dpr)
         canvas.fill(Qt.GlobalColor.transparent)
         painter = QPainter(canvas)
-        painter.drawPixmap(0, 0, base)
-        painter.drawPixmap(18, 3, MainWindow._arrow_pixmap(expanded))
+        # 品牌标经 icon.paint 按画布物理尺寸(18*dpr)栅格化:SVG 引擎矢量
+        # 直出该尺寸,染色标取最近底图缩放,都不会再被 DPI 拉伸
+        base_icon.paint(painter, 0, 0, 18, 18)
+        painter.drawPixmap(18, 3, cls._arrow_pixmap(expanded))  # 自带 2x DPR
         painter.end()
         return QIcon(canvas)
 

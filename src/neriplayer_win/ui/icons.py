@@ -51,7 +51,9 @@ ICON_NAMES = (
 )
 BRAND_ICON_NAMES = ("bilibili", "netease")
 
-_RENDER_SIZE = 64  # 染色画布尺寸; QIcon 缩放到控件尺寸足够清晰
+# 染色画布尺寸;QIcon 缩放到控件尺寸足够清晰。
+# 128px:侧栏图标格 30x18 逻辑,250% DPI 下需 75px 物理,64px 会被放大发糊
+_RENDER_SIZE = 128
 _cache: dict[tuple[str, int], QIcon] = {}
 
 

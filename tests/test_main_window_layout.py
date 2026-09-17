@@ -197,6 +197,27 @@ class TestSidebarCollapse:
         finally:
             _close(window)
 
+    def test_header_icons_carry_hidpi_backing(self, qapp, monkeypatch, tmp_path):
+        """防回归:分区头合成图标必须带 ≥2x 物理底图。
+
+        DPR=1 的 30x18 画布在 125%~200% 缩放的屏幕上会被拉伸渲染,
+        品牌标/折叠三角发糊(用户可感知);合成画布固定 2x 栅格化。"""
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._account = NeteaseAccount(user_id=1, nickname="测试")
+            window._bili_account = BiliAccount(mid=42, uname="测试")
+            window._recent = [main_window_module._ListRef("bili-folder", 9, "收藏夹")]
+            window._rebuild_sidebar()
+            for section in ("recent", "netease", "netease-subscribed", "bili"):
+                header = window.sidebar.find_header(section)
+                hidpi = header.icon(0).pixmap(QSize(30, 18), 2.0)
+                assert hidpi.devicePixelRatio() == 2.0, (
+                    f"{section} 分区头图标没有 2x 物理底图"
+                )
+                assert (hidpi.width(), hidpi.height()) == (60, 36)
+        finally:
+            _close(window)
+
     def test_header_click_collapses_and_persists(self, qapp, monkeypatch, tmp_path):
         window = _make_window(qapp, monkeypatch, tmp_path)
         try:
