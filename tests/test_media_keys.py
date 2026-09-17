@@ -48,7 +48,10 @@ def test_hotkey_message_dispatches_play_pause():
     fired: list[str] = []
     handler.play_pause_requested.connect(lambda: fired.append("pp"))
     try:
-        msg = _make_msg(WM_HOTKEY, 1, 0)
+        if not handler.hotkeys_active:
+            pytest.skip("媒体键被其他程序占用(如应用本体正在运行),热键分发不适用")
+        # 用实际注册到的 hotkey id,不写死 1(注册失败时集合为空)
+        msg = _make_msg(WM_HOTKEY, handler._registered_ids[0], 0)
         consumed, _ = handler._filter.nativeEventFilter(
             b"windows_generic_MSG", ctypes.addressof(msg)
         )
