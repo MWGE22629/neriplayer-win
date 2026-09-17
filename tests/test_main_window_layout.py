@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import time
 
-from PySide6.QtCore import QPointF, QMimeData, Qt
+from PySide6.QtCore import QPointF, QMimeData, QSize, Qt
 from PySide6.QtGui import QDropEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem
@@ -160,6 +160,43 @@ class TestSidebarTreeStructure:
 
 
 class TestSidebarCollapse:
+    def test_every_section_arrow_rotates_on_toggle(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        """回归(v0.2.0 起的老 bug):所有分区头折叠/展开后角标必须转向。
+
+        旧实现把分区键(netease-subscribed / bili / recent)当品牌名传入
+        _section_header_icon,查 _SOFT_BRAND_COLORS 时 KeyError 在 Qt 槽内
+        被吞、setIcon 不执行——表现为只有「网易云 · 歌单」的角标会动,
+        其余三个分区角标冻结;且已登录(bili)时必现。"""
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            # 双平台登录 + 一条最近记录:四个分区头齐备
+            window._account = NeteaseAccount(user_id=1, nickname="测试")
+            window._bili_account = BiliAccount(mid=42, uname="测试")
+            window._recent = [main_window_module._ListRef("bili-folder", 9, "收藏夹")]
+            window._rebuild_sidebar()
+            for section in ("recent", "netease", "netease-subscribed", "bili"):
+                header = window.sidebar.find_header(section)
+                assert header is not None and header.isExpanded(), section
+                expanded_image = (
+                    header.icon(0).pixmap(QSize(30, 18)).toImage()
+                )
+                header.setExpanded(False)  # 经 itemCollapsed 刷新角标
+                collapsed_image = (
+                    header.icon(0).pixmap(QSize(30, 18)).toImage()
+                )
+                assert collapsed_image != expanded_image, (
+                    f"{section} 分区头折叠后角标未转向"
+                )
+                header.setExpanded(True)
+                reopened = header.icon(0).pixmap(QSize(30, 18)).toImage()
+                assert reopened == expanded_image, (
+                    f"{section} 分区头展开后角标未转回"
+                )
+        finally:
+            _close(window)
+
     def test_header_click_collapses_and_persists(self, qapp, monkeypatch, tmp_path):
         window = _make_window(qapp, monkeypatch, tmp_path)
         try:

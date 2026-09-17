@@ -1200,7 +1200,13 @@ class MainWindow(QMainWindow):
 
     def _on_sidebar_section_toggled(self, item: QTreeWidgetItem) -> None:
         """分区头展开状态变化(单击分区头切换;重建期被 blockSignals 抑制)
-        → 写盘(键见 store.SETTING_SIDEBAR_EXPANDED)并刷新三角指示。"""
+        → 写盘(键见 store.SETTING_SIDEBAR_EXPANDED)并刷新三角指示。
+
+        刷新走 _apply_item_icons 按条目 kind 分发:平台分区头是品牌标合成,
+        「最近」分区头是单色 history 合成——不能拿分区键直接当品牌名调
+        _section_header_icon(netease-subscribed / bili / recent 会 KeyError
+        在槽内被吞,角标冻结不转向,v0.2.0 起的老 bug)。
+        """
         section = _HEADER_SECTION.get(_SidebarTree.item_kind(item))
         if section is None:
             return  # 非分区头不涉及
@@ -1210,7 +1216,7 @@ class MainWindow(QMainWindow):
         )
         flags[section] = item.isExpanded()
         self._store.save_settings(self._settings)
-        item.setIcon(0, self._section_header_icon(section, item.isExpanded()))
+        self._apply_item_icons(item)
 
     def _on_sidebar_order_changed(self, section: str) -> None:
         """分区内拖拽排序落库:读子节点顺序写设置键,并同步内存列表。"""
