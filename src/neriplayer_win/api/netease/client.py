@@ -269,6 +269,53 @@ def _parse_song_item(track: Mapping[str, Any]) -> NeteaseSong | None:
     )
 
 
+def first_recommended_song_array(root: Mapping[str, Any]) -> list[Any]:
+    """推荐类接口响应里的歌曲数组(模块级纯函数,便于单测)。
+
+    回退链对照参考实现 NeteaseHomeRecommendations.kt 的 firstSongArray:
+    每日推荐(data.dailySongs)、私人 FM(data)、推荐歌单详情等不同接口
+    的落位不同,逐级探测;都缺失时返回空列表。
+    """
+    data = root.get("data")
+    candidates = [
+        data.get("dailySongs") if isinstance(data, dict) else None,
+        data.get("songs") if isinstance(data, dict) else None,
+        data if isinstance(data, list) else None,
+        root.get("result"),
+        root.get("songs"),
+        root.get("playlist").get("tracks") if isinstance(root.get("playlist"), dict) else None,
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            return candidate
+    return []
+
+
+def parse_recommended_songs_response(raw_response: str) -> list[NeteaseSong]:
+    """解析每日推荐等推荐类接口响应;301 抛 NeteaseAuthRequiredError。
+
+    歌曲条目复用 _parse_song_item(ar/al/dt 字段与歌单详情一致)。
+    """
+    try:
+        root = json.loads(raw_response)
+    except (json.JSONDecodeError, TypeError):
+        raise NeteaseApiError("推荐接口响应不是合法 JSON")
+    if not isinstance(root, dict):
+        raise NeteaseApiError("推荐接口响应格式异常")
+    code = root.get("code", -1)
+    if code == 301:
+        raise NeteaseAuthRequiredError("登录态已失效,请重新扫码登录")
+    if code != 200:
+        raise NeteaseApiError(f"获取每日推荐失败: code={code}")
+    songs: list[NeteaseSong] = []
+    for item in first_recommended_song_array(root):
+        if isinstance(item, dict):
+            song = _parse_song_item(item)
+            if song is not None:
+                songs.append(song)
+    return songs
+
+
 def split_user_playlists(items: Any, user_id: int) -> NeteaseUserPlaylists:
     """user/playlist 的 playlist 数组按归属分流(模块级纯函数,便于单测)。
 
@@ -783,6 +830,23 @@ class NeteaseClient:
             if song is not None:
                 songs.append(song)
         return songs
+
+    # -- 每日推荐 ------------------------------------------------------------
+
+    def get_daily_recommended_songs_raw(self, afresh: bool = False) -> str:
+        """对应 getDailyRecommendedSongs(/v3/discovery/recommend/songs)。
+
+        afresh=True 让服务端换一批推荐(对应 Kotlin 默认 false)。
+        """
+        return self.call_weapi(
+            "/v3/discovery/recommend/songs",
+            {"afresh": "true" if afresh else "false"},
+            use_persisted_cookies=True,
+        )
+
+    def get_daily_recommended_songs(self, afresh: bool = False) -> list[NeteaseSong]:
+        """每日推荐歌曲(约 30 首/天);未登录/登录过期抛 NeteaseAuthRequiredError。"""
+        return parse_recommended_songs_response(self.get_daily_recommended_songs_raw(afresh))
 
     # -- 播放地址 ------------------------------------------------------------
 

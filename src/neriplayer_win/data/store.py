@@ -46,15 +46,34 @@ SETTING_SIDEBAR_EXPANDED = "sidebar_expanded"
 SETTING_NETEASE_PLAYLIST_ORDER = "netease_playlist_order"
 SETTING_NETEASE_SUBSCRIBED_ORDER = "netease_subscribed_order"
 SETTING_BILI_FOLDER_ORDER = "bili_folder_order"
+# 「最近」列表(M5):recent_max 记录侧栏展示条数(默认 8);recent_lists
+# 是最近播放过的列表栈(新→旧),元素 {"kind", "id", "title"},kind 取
+# RECENT_KINDS 白名单。仅浏览不计,起播才压栈(由 MainWindow 负责)。
+SETTING_RECENT_MAX = "recent_max"
+SETTING_RECENT_LISTS = "recent_lists"
 DEFAULT_CLOSE_ACTION = "tray"
 DEFAULT_PLAY_MODE = "sequence"
 DEFAULT_APPEARANCE = "dark"
 DEFAULT_PLAY_QUALITY = "lossless"
+DEFAULT_RECENT_MAX = 8
 _VALID_CLOSE_ACTIONS = ("exit", "tray")
 _VALID_PLAY_MODES = ("sequence", "shuffle", "repeat_one")
 _VALID_APPEARANCES = ("dark", "light")
 _VALID_PLAY_QUALITIES = ("standard", "exhigh", "lossless")
-_SIDEBAR_SECTIONS = ("netease", "netease-subscribed", "bili")
+_MIN_RECENT_MAX = 1
+_MAX_RECENT_MAX = 50
+# 公开别名:设置页 SpinBox 的范围与文档共用
+MIN_RECENT_MAX = _MIN_RECENT_MAX
+MAX_RECENT_MAX = _MAX_RECENT_MAX
+# 最近列表的来源种类:网易云自建/收藏歌单、B站收藏夹/稍后再看、每日推荐
+RECENT_KINDS = (
+    "netease-playlist",
+    "netease-subscribed-playlist",
+    "bili-folder",
+    "bili-watchlater",
+    "netease-daily",
+)
+_SIDEBAR_SECTIONS = ("netease", "netease-subscribed", "bili", "recent")
 _SETTING_ID_ORDERS = (
     SETTING_NETEASE_PLAYLIST_ORDER,
     SETTING_NETEASE_SUBSCRIBED_ORDER,
@@ -73,6 +92,8 @@ def default_settings() -> dict[str, Any]:
         SETTING_NETEASE_PLAYLIST_ORDER: [],
         SETTING_NETEASE_SUBSCRIBED_ORDER: [],
         SETTING_BILI_FOLDER_ORDER: [],
+        SETTING_RECENT_MAX: DEFAULT_RECENT_MAX,
+        SETTING_RECENT_LISTS: [],
     }
 
 _COOKIE_NAME_REGEX = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
@@ -137,6 +158,41 @@ def _validated_id_order(value: Any) -> list[int] | None:
     ):
         return value
     return None
+
+
+def _validated_recent_max(value: Any) -> int:
+    """recent_max 校验:非法/越界回落默认 8(钳在 1~50)。"""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return max(_MIN_RECENT_MAX, min(_MAX_RECENT_MAX, value))
+    return DEFAULT_RECENT_MAX
+
+
+def _validated_recent_lists(value: Any, max_entries: int) -> list[dict[str, Any]]:
+    """recent_lists 校验:逐条过滤(kind 白名单 / id int / title str),
+    保序去重(同 kind+id 只留首个),截断到 max_entries。"""
+    if not isinstance(value, list):
+        return []
+    seen: set[tuple[str, int]] = set()
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict) or len(result) >= max_entries:
+            continue
+        kind = item.get("kind")
+        entry_id = item.get("id")
+        title = item.get("title")
+        if (
+            kind not in RECENT_KINDS
+            or not isinstance(entry_id, int)
+            or isinstance(entry_id, bool)
+            or entry_id < 0
+            or not isinstance(title, str)
+        ):
+            continue
+        if (kind, entry_id) in seen:
+            continue
+        seen.add((kind, entry_id))
+        result.append({"kind": kind, "id": entry_id, "title": title})
+    return result
 
 
 def apply_stored_order(stored: Sequence[int], current: Sequence[int]) -> list[int]:
@@ -320,6 +376,11 @@ class LocalStore:
             order = _validated_id_order(data.get(key))
             if order is not None:
                 merged[key] = order
+        # 先取 max 再按它截断最近列表(存量超限时静默裁掉)
+        merged[SETTING_RECENT_MAX] = _validated_recent_max(data.get(SETTING_RECENT_MAX))
+        merged[SETTING_RECENT_LISTS] = _validated_recent_lists(
+            data.get(SETTING_RECENT_LISTS), merged[SETTING_RECENT_MAX]
+        )
         return merged
 
     def save_settings(self, settings: Mapping[str, Any]) -> bool:
@@ -340,6 +401,10 @@ class LocalStore:
             order = _validated_id_order(settings.get(key))
             if order is not None:
                 merged[key] = order
+        merged[SETTING_RECENT_MAX] = _validated_recent_max(settings.get(SETTING_RECENT_MAX))
+        merged[SETTING_RECENT_LISTS] = _validated_recent_lists(
+            settings.get(SETTING_RECENT_LISTS), merged[SETTING_RECENT_MAX]
+        )
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
             self._settings_path.write_text(

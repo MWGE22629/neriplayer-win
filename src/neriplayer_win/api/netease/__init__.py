@@ -15,9 +15,11 @@ from .client import (
     NeteaseClient,
     build_quality_candidates,
     build_qr_account_params,
+    first_recommended_song_array,
     merge_netease_request_cookies,
     merge_qr_credential_cookies,
     parse_playback_response,
+    parse_recommended_songs_response,
     should_preheat_netease_weapi_session,
     split_user_playlists,
 )
@@ -56,9 +58,11 @@ __all__ = [
     "YdTokenFetcher",
     "build_quality_candidates",
     "build_qr_account_params",
+    "first_recommended_song_array",
     "merge_netease_request_cookies",
     "merge_qr_credential_cookies",
     "parse_playback_response",
+    "parse_recommended_songs_response",
     "should_preheat_netease_weapi_session",
     "split_user_playlists",
 ]

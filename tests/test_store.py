@@ -193,11 +193,91 @@ class TestLocalStoreSettings:
             "play_quality": "lossless",
             "sidebar_expanded": {
                 "netease": True, "netease-subscribed": True, "bili": True,
+                "recent": True,
             },
             "netease_playlist_order": [],
             "netease_subscribed_order": [],
             "bili_folder_order": [],
+            "recent_max": 8,
+            "recent_lists": [],
         }
+
+
+class TestRecentSettings:
+    """「最近」列表设置:recent_max(1~50,默认 8)与 recent_lists 栈。"""
+
+    def test_recent_max_roundtrip(self, tmp_path, monkeypatch):
+        store = make_store(tmp_path, monkeypatch)
+        assert store.save_settings({"recent_max": 20}) is True
+        assert store.load_settings()["recent_max"] == 20
+
+    def test_recent_max_bounds_and_fallback(self, tmp_path, monkeypatch):
+        store = make_store(tmp_path, monkeypatch)
+        # 越界钳到边界;非 int 回落默认
+        assert store.save_settings({"recent_max": 0}) is True
+        assert store.load_settings()["recent_max"] == 1
+        assert store.save_settings({"recent_max": 999}) is True
+        assert store.load_settings()["recent_max"] == 50
+        store.settings_path.parent.mkdir(parents=True, exist_ok=True)
+        store.settings_path.write_text(
+            json.dumps({"recent_max": "8"}), encoding="utf-8"
+        )
+        assert store.load_settings()["recent_max"] == 8
+
+    def test_recent_lists_roundtrip_dedup_and_trim(self, tmp_path, monkeypatch):
+        store = make_store(tmp_path, monkeypatch)
+        entries = [
+            {"kind": "netease-playlist", "id": 1, "title": "歌单A"},
+            {"kind": "bili-folder", "id": 9, "title": "收藏夹"},
+            {"kind": "netease-daily", "id": 0, "title": "每日推荐"},
+            # 同 kind+id 重复:保序去重只留首个
+            {"kind": "netease-playlist", "id": 1, "title": "歌单A改名"},
+            # 超出 recent_max=3 的尾部被截断
+            {"kind": "bili-watchlater", "id": 0, "title": "稍后再看"},
+        ]
+        assert store.save_settings({"recent_max": 3, "recent_lists": entries}) is True
+        loaded = store.load_settings()["recent_lists"]
+        assert loaded == [
+            {"kind": "netease-playlist", "id": 1, "title": "歌单A"},
+            {"kind": "bili-folder", "id": 9, "title": "收藏夹"},
+            {"kind": "netease-daily", "id": 0, "title": "每日推荐"},
+        ]
+
+    def test_recent_lists_invalid_entries_dropped(self, tmp_path, monkeypatch):
+        store = make_store(tmp_path, monkeypatch)
+        store.settings_path.parent.mkdir(parents=True, exist_ok=True)
+        store.settings_path.write_text(
+            json.dumps(
+                {
+                    "recent_lists": [
+                        {"kind": "youtube", "id": 1, "title": "未知来源"},  # kind 白名单外
+                        {"kind": "bili-folder", "id": "9", "title": "id 非整型"},
+                        {"kind": "bili-folder", "id": 9},  # 缺 title
+                        {"kind": "bili-folder", "id": -1, "title": "负 id"},
+                        "not-a-dict",
+                        {"kind": "netease-playlist", "id": 5, "title": "合法"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        loaded = store.load_settings()["recent_lists"]
+        assert loaded == [{"kind": "netease-playlist", "id": 5, "title": "合法"}]
+
+    def test_load_trims_stale_entries_to_max(self, tmp_path, monkeypatch):
+        """存量条数超过 recent_max:加载时按栈顶(新→旧)截断。"""
+        store = make_store(tmp_path, monkeypatch)
+        store.settings_path.parent.mkdir(parents=True, exist_ok=True)
+        entries = [
+            {"kind": "netease-playlist", "id": i, "title": f"歌单{i}"}
+            for i in range(6)  # 栈顶在前
+        ]
+        store.settings_path.write_text(
+            json.dumps({"recent_max": 2, "recent_lists": entries}),
+            encoding="utf-8",
+        )
+        loaded = store.load_settings()["recent_lists"]
+        assert [entry["id"] for entry in loaded] == [0, 1]
 
 
 class TestApplyStoredOrder:
@@ -225,7 +305,8 @@ class TestApplyStoredOrder:
 
 
 class TestSidebarExpandedSetting:
-    """M5 分区折叠状态:{"netease"/"netease-subscribed"/"bili": bool},默认全展开。"""
+    """M5 分区折叠状态:{"netease"/"netease-subscribed"/"bili"/"recent": bool},
+    默认全展开(recent 为「最近」分区)。"""
 
     def test_defaults(self, tmp_path, monkeypatch):
         store = make_store(tmp_path, monkeypatch)
@@ -233,11 +314,15 @@ class TestSidebarExpandedSetting:
             "netease": True,
             "netease-subscribed": True,
             "bili": True,
+            "recent": True,
         }
 
     def test_roundtrip(self, tmp_path, monkeypatch):
         store = make_store(tmp_path, monkeypatch)
-        flags = {"netease": False, "netease-subscribed": True, "bili": False}
+        flags = {
+            "netease": False, "netease-subscribed": True, "bili": False,
+            "recent": True,
+        }
         assert store.save_settings({"sidebar_expanded": flags}) is True
         assert store.load_settings()["sidebar_expanded"] == flags
 
@@ -250,12 +335,13 @@ class TestSidebarExpandedSetting:
             ),
             encoding="utf-8",
         )
-        # netease 非 bool 逐键回落默认;netease-subscribed 缺省回落默认;
+        # netease 非 bool 逐键回落默认;netease-subscribed/recent 缺省回落默认;
         # bili 合法保留
         assert store.load_settings()["sidebar_expanded"] == {
             "netease": True,
             "netease-subscribed": True,
             "bili": False,
+            "recent": True,
         }
 
     def test_non_dict_falls_back(self, tmp_path, monkeypatch):
@@ -268,6 +354,7 @@ class TestSidebarExpandedSetting:
             "netease": True,
             "netease-subscribed": True,
             "bili": True,
+            "recent": True,
         }
 
 

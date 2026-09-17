@@ -26,15 +26,17 @@ from neriplayer_win.api.bili import BiliAccount, BiliFavFolder, BiliFavItem
 from neriplayer_win.api.netease import (
     NeteaseAccount,
     NeteasePlaylist,
+    NeteaseSong,
     NeteaseUserPlaylists,
 )
 from neriplayer_win.player.queue import BackupUrlRotator, PlayMode, QueueSong
 from neriplayer_win.ui import main_window as main_window_module
 from neriplayer_win.ui.main_window import (
-    MainWindow,
     _ActivePlay,
+    _ListRef,
     _PrefetchedPlay,
     _SidebarTree,
+    MainWindow,
 )
 
 _ROLE = Qt.ItemDataRole.UserRole
@@ -180,6 +182,7 @@ class TestSidebarCollapse:
                 "netease": False,
                 "netease-subscribed": True,
                 "bili": True,
+                "recent": True,
             }
             # 全量重建后重新应用收起状态(不回弹)
             window._rebuild_sidebar()
@@ -255,13 +258,15 @@ class TestStoredOrderApplied:
             window._on_playlists_loaded(
                 NeteaseUserPlaylists(subscribed=_netease_playlists(10, 20, 30))
             )
-            # 收藏分区是第二个顶层项
+            # 收藏分区是第二个顶层项(无最近条目时不出现「最近」分区)
             header = window.sidebar.topLevelItem(1)
             assert header.data(0, _ROLE) == ("netease-subscribed-header", None)
             roles = [
                 header.child(i).data(0, _ROLE) for i in range(header.childCount())
             ]
+            # 每日推荐固定首位,其后才是收藏歌单(按存储序)
             assert roles == [
+                ("netease-daily", None),
                 ("netease-subscribed-playlist", 30),
                 ("netease-subscribed-playlist", 10),
                 ("netease-subscribed-playlist", 20),
@@ -327,12 +332,15 @@ class TestSubscribedSection:
             )
             assert created.data(0, _ROLE) == ("netease-header", None)
             assert subscribed.data(0, _ROLE) == ("netease-subscribed-header", None)
-            assert subscribed.child(0).text(0) == "共享歌单(28)"
-            assert subscribed.child(0).data(0, _ROLE) == (
+            # 每日推荐固定首位(不参与拖拽排序)
+            assert subscribed.child(0).text(0) == "每日推荐"
+            assert subscribed.child(0).data(0, _ROLE) == ("netease-daily", None)
+            assert subscribed.child(1).text(0) == "共享歌单(28)"
+            assert subscribed.child(1).data(0, _ROLE) == (
                 "netease-subscribed-playlist", 31,
             )
             # track_count 为 0 不追加计数
-            assert subscribed.child(1).text(0) == "空收藏"
+            assert subscribed.child(2).text(0) == "空收藏"
             # 分区独立折叠持久化
             subscribed.setExpanded(False)
             data = json.loads(
@@ -350,8 +358,9 @@ class TestSubscribedSection:
                 NeteaseUserPlaylists(created=_netease_playlists(1))
             )
             subscribed = window.sidebar.topLevelItem(1)
-            assert subscribed.childCount() == 1
-            child = subscribed.child(0)
+            # 每日推荐固定首位,占位在其后
+            assert subscribed.child(0).data(0, _ROLE) == ("netease-daily", None)
+            child = subscribed.child(1)
             assert child.text(0) == "收藏加载中…"
             assert child.data(0, _ROLE) == ("netease-subscribed-loading", None)
             assert not child.flags() & Qt.ItemFlag.ItemIsSelectable
@@ -426,6 +435,7 @@ class TestBiliWatchLater:
             _close(window)
 
     def test_watchlater_click_loads_items(self, qapp, monkeypatch, tmp_path):
+        """表格与队列解耦:点击加载只填表格,播放队列不被替换。"""
         scheduled = _capture_async(monkeypatch)
         window = _make_window(qapp, monkeypatch, tmp_path)
         try:
@@ -451,10 +461,15 @@ class TestBiliWatchLater:
             assert len(scheduled) == 1
             fetch, on_done, _on_error = scheduled[0]
             on_done(fetch())
-            # 不可播条目(无 bvid)被跳过
+            # 不可播条目(无 bvid)被跳过;表格填的是浏览列表
             assert window.song_table.rowCount() == 1
-            assert window._queue.items()[0].title == "视频A"
-            assert window._queue.items()[0].bvid == "BV1"
+            assert window._table_songs[0].title == "视频A"
+            assert window._table_songs[0].bvid == "BV1"
+            assert window._table_context == main_window_module._ListRef(
+                kind="bili-watchlater", id=0, title="稍后再看",
+            )
+            # 队列仍是空的:浏览不动队列,双击才装入
+            assert window._queue.items() == []
             # 计数刷新并回写侧栏
             assert window._bili_watchlater_count == 2
             assert (
@@ -1108,5 +1123,377 @@ class TestPrefetchStaleUrlFallback:
             assert engine.played == ["backup"]
             assert scheduled == []
             assert window._active.from_prefetch is True  # 未到兜底分支
+        finally:
+            _close(window)
+
+
+
+
+# ---------------------------------------------------------------------------
+# 表格与播放队列解耦:浏览不换队列,双击才切换;右键「下一首播放」插播
+# ---------------------------------------------------------------------------
+
+
+def _load_table_playlist(
+    window, monkeypatch, scheduled, playlist_id: int = 11, count: int = 2
+) -> None:
+    """点击侧栏歌单把歌曲装进表格(client 已猴补,不触网)。"""
+    monkeypatch.setattr(
+        window._client,
+        "get_playlist_tracks",
+        lambda _pid: [
+            NeteaseSong(id=i, title=f"歌{i}", artist=f"歌手{i}", duration_ms=60000)
+            for i in range(count)
+        ],
+    )
+    window._account = NeteaseAccount(user_id=1, nickname="测试")
+    window._playlists = [
+        NeteasePlaylist(id=playlist_id, name="列表B", track_count=count)
+    ]
+    window._rebuild_sidebar()
+    item = window.sidebar.topLevelItem(0).child(0)
+    window._on_sidebar_item_clicked(item, 0)
+    assert scheduled, "点击歌单应调度一次后台加载"
+    fetch, on_done, _on_error = scheduled[-1]
+    on_done(fetch())
+
+
+class TestTableQueueDecoupling:
+    """侧栏点击只填表格(浏览);双击表格才把该列表装入播放队列。"""
+
+    def test_browse_keeps_queue_intact(self, qapp, monkeypatch, tmp_path):
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            songs_a = [_fail_song(i) for i in range(3)]
+            window._queue.replace(songs_a)
+            window._queue_context = _ListRef("netease-playlist", 1, "列表A")
+            _load_table_playlist(window, monkeypatch, scheduled, playlist_id=11)
+            assert window._table_context == _ListRef(
+                "netease-playlist", 11, "列表B"
+            )
+            assert [s.id for s in window._queue.items()] == [0, 1, 2]  # 队列原样
+            assert window.song_table.rowCount() == 2  # 表格是浏览的列表
+        finally:
+            _close(window)
+
+    def test_double_click_other_list_switches_queue(self, qapp, monkeypatch, tmp_path):
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._queue.replace([_fail_song(i) for i in range(3)])
+            window._queue_context = _ListRef("netease-playlist", 1, "列表A")
+            _load_table_playlist(window, monkeypatch, scheduled, playlist_id=11)
+            window._play_from_table(0)
+            # 队列换成浏览的列表,从所点行起播
+            assert [s.id for s in window._queue.items()] == [0, 1]
+            assert window._queue.current_index() == 0
+            assert window._queue_context == _ListRef("netease-playlist", 11, "列表B")
+            assert window._queue_dirty is False
+        finally:
+            _close(window)
+
+    def test_double_click_same_list_jumps_without_replace(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        """队列来源即当前表格且未被插播改写:双击等价纯 jump,不再整体替换。"""
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            _load_table_playlist(window, monkeypatch, scheduled, playlist_id=11)
+            window._play_from_table(0)  # 装入队列起播
+            changed: list[str] = []
+            window._queue.queue_changed.connect(lambda: changed.append("x"))
+            window._play_from_table(1)  # 同列表双击另一行
+            assert changed == []  # 没有 replace
+            assert window._queue.current_index() == 1
+        finally:
+            _close(window)
+
+    def test_double_click_after_insert_rebuilds_from_table(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        """插播改写队列后(_queue_dirty),同列表双击也按表格内容重装。"""
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            _load_table_playlist(window, monkeypatch, scheduled, playlist_id=11)
+            window._play_from_table(0)
+            window._insert_next_from_table(0)  # 插播表格第 0 行
+            assert window._queue_dirty is True
+            window._play_from_table(1)  # 重装:插播条目让位给净表内容
+            assert window._queue_dirty is False
+            assert [s.id for s in window._queue.items()] == [0, 1]
+            assert window._queue.current_index() == 1
+        finally:
+            _close(window)
+
+
+class TestPlayNextInsertUI:
+    """右键「下一首播放」:表格行插入队列当前曲之后,不动其余部分。"""
+
+    def test_insert_next_puts_song_after_current(self, qapp, monkeypatch, tmp_path):
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._queue.replace([_fail_song(i) for i in range(3)])
+            window._queue.jump(1)
+            window._queue_context = _ListRef("netease-playlist", 1, "列表A")
+            _load_table_playlist(window, monkeypatch, scheduled, playlist_id=11)
+            window._insert_next_from_table(0)
+            assert window._queue.item_at(2) is window._table_songs[0]
+            assert [s.id for s in window._queue.items()] == [0, 1, 0, 2]
+            assert window._queue.current_index() == 1  # 当前曲不动
+            assert window._queue.peek_next() == 2  # 下一首是插播曲
+            assert window._queue_dirty is True
+            assert "下一首播放" in window.statusBar().currentMessage()
+        finally:
+            _close(window)
+
+    def test_insert_twice_keeps_click_order(self, qapp, monkeypatch, tmp_path):
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._queue.replace([_fail_song(i) for i in range(2)])
+            window._queue.jump(0)
+            _load_table_playlist(window, monkeypatch, scheduled, playlist_id=11)
+            window._insert_next_from_table(0)
+            window._insert_next_from_table(1)
+            # 当前曲是索引 0:两首插播依次落在 1、2,按点击顺序
+            second = window._queue.item_at(1)
+            assert second is not None and second.title == "歌0"
+            third = window._queue.item_at(2)
+            assert third is not None and third.title == "歌1"
+            assert window._queue.advance_ended() == 1  # 先接播第一首插播
+        finally:
+            _close(window)
+
+
+# ---------------------------------------------------------------------------
+# 「最近」分区:起播压栈 / 去重置顶 / 上限 / 点击加载 / 持久化
+# ---------------------------------------------------------------------------
+
+
+class TestRecentSection:
+    def _start(self, window, ref) -> None:
+        window._queue_context = ref
+        window._start_play(_fail_song(1), BackupUrlRotator(["http://example/a"]), None)
+
+    def test_start_play_pushes_queue_list(self, qapp, monkeypatch, tmp_path):
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        monkeypatch.setattr(window, "engine", _StubEngine())
+        try:
+            ref = _ListRef("netease-playlist", 7, "歌单七")
+            self._start(window, ref)
+            assert window._recent == [ref]
+            # 「最近」分区出现在侧栏最顶,子节点带来源 payload
+            header = window.sidebar.topLevelItem(0)
+            assert header.data(0, _ROLE) == ("recent-header", None)
+            assert header.child(0).data(0, _ROLE) == (
+                "recent-item", ("netease-playlist", 7, "歌单七"),
+            )
+            assert header.child(0).text(0) == "歌单七"
+            # 落盘
+            data = json.loads(
+                (tmp_path / "settings.json").read_text(encoding="utf-8")
+            )
+            assert data["recent_lists"] == [
+                {"kind": "netease-playlist", "id": 7, "title": "歌单七"}
+            ]
+        finally:
+            _close(window)
+
+    def test_browse_only_never_pushes(self, qapp, monkeypatch, tmp_path):
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            _load_table_playlist(window, monkeypatch, scheduled, playlist_id=11)
+            assert window._recent == []  # 只是浏览,没播放
+            assert window.sidebar.topLevelItem(0).data(0, _ROLE) == (
+                "netease-header", None,
+            )  # 「最近」分区不出现
+        finally:
+            _close(window)
+
+    def test_dedupe_moves_to_top(self, qapp, monkeypatch, tmp_path):
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        monkeypatch.setattr(window, "engine", _StubEngine())
+        try:
+            self._start(window, _ListRef("netease-playlist", 1, "A"))
+            self._start(window, _ListRef("bili-folder", 9, "B"))
+            self._start(window, _ListRef("netease-playlist", 1, "A改名"))
+            assert window._recent == [
+                _ListRef("netease-playlist", 1, "A改名"),  # 置顶并刷新标题
+                _ListRef("bili-folder", 9, "B"),
+            ]
+        finally:
+            _close(window)
+
+    def test_cap_trims_to_setting(self, qapp, monkeypatch, tmp_path):
+        scheduled = _capture_async(monkeypatch)
+        (tmp_path / "settings.json").write_text(
+            json.dumps({"recent_max": 3}), encoding="utf-8"
+        )
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        monkeypatch.setattr(window, "engine", _StubEngine())
+        try:
+            for i in range(5):
+                self._start(window, _ListRef("netease-playlist", i, f"歌单{i}"))
+            assert [(r.kind, r.id) for r in window._recent] == [
+                ("netease-playlist", 4),
+                ("netease-playlist", 3),
+                ("netease-playlist", 2),
+            ]
+        finally:
+            _close(window)
+
+    def test_repeat_push_no_sidebar_rebuild(self, qapp, monkeypatch, tmp_path):
+        """栈顶已是同一列表(连播场景):内容无变化不重建侧栏。"""
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        monkeypatch.setattr(window, "engine", _StubEngine())
+        try:
+            ref = _ListRef("netease-playlist", 1, "A")
+            self._start(window, ref)
+            rebuilds: list[None] = []
+            monkeypatch.setattr(
+                window, "_rebuild_sidebar", lambda: rebuilds.append(None)
+            )
+            self._start(window, ref)  # 同列表下一首
+            assert rebuilds == []
+            assert window._recent == [ref]
+        finally:
+            _close(window)
+
+    def test_recent_item_click_loads_list(self, qapp, monkeypatch, tmp_path):
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        monkeypatch.setattr(window, "engine", _StubEngine())
+        try:
+            self._start(window, _ListRef("netease-playlist", 11, "列表B"))
+            _load_table_playlist(window, monkeypatch, scheduled, playlist_id=11)
+            # 最近分区的条目重新点击仍能加载(与原生条目同一分发)
+            recent_child = window.sidebar.topLevelItem(0).child(0)
+            assert recent_child.data(0, _ROLE) == (
+                "recent-item", ("netease-playlist", 11, "列表B"),
+            )
+            scheduled.clear()
+            window._on_sidebar_item_clicked(recent_child, 0)
+            assert window.central_stack.currentIndex() == 1
+            assert len(scheduled) == 1
+            fetch, on_done, _on_error = scheduled[0]
+            on_done(fetch())
+            assert window.song_table.rowCount() == 2
+            assert "列表B" in window.statusBar().currentMessage()
+        finally:
+            _close(window)
+
+    def test_recent_survives_restart(self, qapp, monkeypatch, tmp_path):
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        monkeypatch.setattr(window, "engine", _StubEngine())
+        try:
+            self._start(window, _ListRef("bili-watchlater", 0, "稍后再看"))
+        finally:
+            _close(window)
+        window2 = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            assert window2._recent == [_ListRef("bili-watchlater", 0, "稍后再看")]
+            header = window2.sidebar.topLevelItem(0)
+            assert header.data(0, _ROLE) == ("recent-header", None)
+            assert header.child(0).text(0) == "稍后再看"
+        finally:
+            _close(window2)
+
+
+# ---------------------------------------------------------------------------
+# 网易云每日推荐:收藏分区固定首位 + 点击加载
+# ---------------------------------------------------------------------------
+
+
+class TestDailyRecommendSection:
+    def _daily_item(self, window):
+        window._account = NeteaseAccount(user_id=1, nickname="测试")
+        window._rebuild_sidebar()
+        subscribed = window.sidebar.topLevelItem(1)
+        assert subscribed.data(0, _ROLE) == ("netease-subscribed-header", None)
+        item = subscribed.child(0)
+        assert item.data(0, _ROLE) == ("netease-daily", None)
+        return item
+
+    def test_daily_click_loads_table(self, qapp, monkeypatch, tmp_path):
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            monkeypatch.setattr(
+                window._client,
+                "get_daily_recommended_songs",
+                lambda: [
+                    NeteaseSong(id=1, title="日推歌", artist="歌手", duration_ms=60000),
+                    NeteaseSong(id=2, title="日推歌2", artist="歌手", duration_ms=60000),
+                ],
+            )
+            item = self._daily_item(window)
+            window._on_sidebar_item_clicked(item, 0)
+            assert window.central_stack.currentIndex() == 1
+            assert len(scheduled) == 1
+            fetch, on_done, _on_error = scheduled[0]
+            on_done(fetch())
+            assert window.song_table.rowCount() == 2
+            assert window._table_context == _ListRef(
+                "netease-daily", 0, "每日推荐"
+            )
+            assert "每日推荐" in window.statusBar().currentMessage()
+        finally:
+            _close(window)
+
+    def test_daily_error_shows_status(self, qapp, monkeypatch, tmp_path):
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            item = self._daily_item(window)
+            window._on_sidebar_item_clicked(item, 0)
+            _fetch, _on_done, on_error = scheduled[0]
+            on_error("登录态已失效")
+            assert "加载每日推荐失败" in window.statusBar().currentMessage()
+        finally:
+            _close(window)
+
+
+# ---------------------------------------------------------------------------
+# 设置页:最近列表数量
+# ---------------------------------------------------------------------------
+
+
+class TestRecentMaxSetting:
+    def test_spin_change_trims_and_persists(self, qapp, monkeypatch, tmp_path):
+        scheduled = _capture_async(monkeypatch)
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        monkeypatch.setattr(window, "engine", _StubEngine())
+        try:
+            for i in range(5):
+                window._queue_context = _ListRef("netease-playlist", i, f"歌单{i}")
+                window._start_play(
+                    _fail_song(1), BackupUrlRotator(["http://example/a"]), None
+                )
+            assert len(window._recent) == 5  # 默认上限 8 不截断
+            # 经设置页控件驱动(信号 → MainWindow 落盘并裁剪)
+            window.settings_page.recent_max_spin.setValue(2)
+            assert len(window._recent) == 2
+            assert window.settings_page.recent_max_spin.value() == 2
+            data = json.loads(
+                (tmp_path / "settings.json").read_text(encoding="utf-8")
+            )
+            assert data["recent_max"] == 2
+            assert len(data["recent_lists"]) == 2
+        finally:
+            _close(window)
+
+    def test_spin_defaults_to_8(self, qapp, monkeypatch, tmp_path):
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            assert window.settings_page.recent_max_spin.value() == 8
         finally:
             _close(window)

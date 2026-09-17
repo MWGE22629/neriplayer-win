@@ -45,6 +45,7 @@ ICON_NAMES = (
     "repeat_one",
     "playlist_play",
     "person",
+    "history",
     "bilibili",
     "netease",
 )

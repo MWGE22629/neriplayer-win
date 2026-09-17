@@ -376,6 +376,94 @@ class TestPlayQueueReplaceResetAndSignals:
             assert mode.button_label
 
 
+class TestInsertNext:
+    """右键「下一首播放」:当前曲后插入,多首按点击顺序累积。"""
+
+    def test_insert_after_current(self, qapp):
+        queue = PlayQueue()
+        queue.replace([song(i) for i in range(3)])
+        queue.jump(1)
+        position = queue.insert_next(song(99))
+        assert position == 2
+        assert [s.id for s in queue.items()] == [0, 1, 99, 2]
+        assert queue.current_index() == 1  # 当前曲不动
+        assert queue.peek_next() == 2  # 下一首变成插播曲(预取目标随之变化)
+        assert queue.advance_ended() == 2  # 播完自动接插播曲
+
+    def test_multiple_inserts_keep_click_order(self, qapp):
+        queue = PlayQueue()
+        queue.replace([song(i) for i in range(3)])
+        queue.jump(0)
+        queue.insert_next(song(100))
+        queue.insert_next(song(101))
+        assert [s.id for s in queue.items()] == [0, 100, 101, 1, 2]
+        # 顺序播完当前曲后依次接播两首插播曲
+        assert queue.advance_ended() == 1  # song(100)
+        assert queue.advance_ended() == 2  # song(101)
+        assert queue.advance_ended() == 3  # 回到原列表 song(1)
+
+    def test_insert_into_empty_queue(self, qapp):
+        queue = PlayQueue()
+        assert queue.insert_next(song(9)) == 0
+        assert queue.next() == 0  # 起播即插播曲
+        assert [s.id for s in queue.items()] == [9]
+
+    def test_insert_without_current_appends_to_head(self, qapp):
+        """队列有内容但尚未开播(index=-1):插到队首。"""
+        queue = PlayQueue()
+        queue.replace([song(i) for i in range(3)])
+        assert queue.insert_next(song(8)) == 0
+        assert [s.id for s in queue.items()] == [8, 0, 1, 2]
+
+    def test_jump_past_inserts_consumes_pending(self, qapp):
+        """跳播越过插播段后,插播不再等待按序接播(新插播从新当前曲后起算)。"""
+        queue = PlayQueue()
+        queue.replace([song(i) for i in range(3)])
+        queue.jump(0)
+        queue.insert_next(song(100))
+        queue.insert_next(song(101))
+        # 此时 ids=[0,100,101,1,2],直接跳到 song(2)(现索引 4)越过插播段
+        queue.jump(4)
+        position = queue.insert_next(song(102))
+        assert position == 5  # 从新当前曲(4)之后起算
+        assert [s.id for s in queue.items()] == [0, 100, 101, 1, 2, 102]
+
+    def test_shuffle_history_indices_adjusted(self, qapp):
+        """随机模式已播历史含插入点之后的索引:插入后整体 +1,prev 回退不串位。"""
+        queue = PlayQueue()
+        queue.replace([song(i) for i in range(3)])
+        queue.set_mode(PlayMode.SHUFFLE)
+        queue.jump(2)
+        queue.jump(0)  # 历史 [2, 0],当前 0
+        queue.insert_next(song(99))  # 插到 1:历史里的 2 应修正为 3
+        assert [s.id for s in queue.items()] == [0, 99, 1, 2]
+        assert queue.prev() == 3
+        assert queue.item_at(3).id == 2  # 回退到的还是原 song(2)
+
+    def test_replace_clears_pending_inserts(self, qapp):
+        queue = PlayQueue()
+        queue.replace([song(i) for i in range(3)])
+        queue.jump(1)
+        queue.insert_next(song(99))
+        queue.replace([song(i) for i in range(2)])  # 切歌单
+        assert queue.insert_next(song(77)) == 0  # 无当前曲,插到队首
+        assert [s.id for s in queue.items()] == [77, 0, 1]
+
+    def test_insert_emits_queue_changed_not_current(self, qapp):
+        """插入只发 queue_changed(队列窗口重建/预取作废),当前曲不变。"""
+        queue = PlayQueue()
+        queue.replace([song(i) for i in range(3)])
+        queue.jump(1)
+        received: list[str] = []
+        current_changed: list[int] = []
+        queue.queue_changed.connect(lambda: received.append("changed"))
+        queue.current_changed.connect(current_changed.append)
+        queue.insert_next(song(99))
+        assert received == ["changed"]
+        assert current_changed == []
+        assert queue.current_index() == 1
+
+
 class TestBackupUrlRotator:
     """B站 backupUrls 候选轮换(加载失败按序换候选,耗尽才判失败)。"""
 
@@ -472,8 +560,8 @@ class TestSettingsStore:
         store.save_settings({"close_action": "exit", "play_mode": "sequence", "junk": 1})
         raw = json.loads(store.settings_path.read_text(encoding="utf-8"))
         # M4 起新增 appearance、M5 起新增 play_quality / sidebar_expanded /
-        # netease_playlist_order / netease_subscribed_order / bili_folder_order
-        # 键;未知键始终被拒
+        # netease_playlist_order / netease_subscribed_order / bili_folder_order /
+        # recent_max / recent_lists 键;未知键始终被拒
         assert set(raw) == {
             "close_action",
             "play_mode",
@@ -483,4 +571,6 @@ class TestSettingsStore:
             "netease_playlist_order",
             "netease_subscribed_order",
             "bili_folder_order",
+            "recent_max",
+            "recent_lists",
         }

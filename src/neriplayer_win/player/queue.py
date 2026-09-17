@@ -70,7 +70,8 @@ class PlayQueue(QObject):
     """带播放模式的播放队列;持有当前曲与已播历史,发信号通知 UI。
 
     信号:
-    - queue_changed:队列内容被整体替换(replace)时发一次。
+    - queue_changed:队列内容变更(整体替换 replace / 当前曲后插入
+      insert_next)时发一次。
     - current_changed(int):当前曲变化(-1 表示无当前曲)。
     - mode_changed(PlayMode):播放模式变化。
     """
@@ -89,6 +90,9 @@ class PlayQueue(QObject):
         # 已播历史(索引按播报顺序记录)与历史游标;仅随机模式的 prev 使用
         self._history: list[int] = []
         self._history_pos: int = -1
+        # 「下一首播放」已插入但尚未播到的条目索引(连续多次插入时按点击
+        # 顺序排在当前曲之后;播过/跳过后即出队)
+        self._pending_inserts: list[int] = []
 
     # -- 查询 ----------------------------------------------------------------
 
@@ -121,6 +125,7 @@ class PlayQueue(QObject):
         self._index = -1
         self._history = []
         self._history_pos = -1
+        self._pending_inserts = []
         self.queue_changed.emit()
         self.current_changed.emit(-1)
 
@@ -129,7 +134,32 @@ class PlayQueue(QObject):
         self._index = -1
         self._history = []
         self._history_pos = -1
+        self._pending_inserts = []
         self.current_changed.emit(-1)
+
+    def insert_next(self, song: QueueSong) -> int:
+        """右键「下一首播放」:把 song 插到当前曲(或上一插入)之后。
+
+        - 无当前曲:插到队首(尚未开播时点插播,起播后按序接上)。
+        - 连续多次插入按点击顺序排在当前曲之后(插到插入段尾部)。
+        - 插入位置之后的当前曲不变;历史与插入段里 >= 插入位的索引
+          整体 +1,随机模式 prev 的历史回退不受影响。
+        - 发 queue_changed(不发 current_changed):队列窗口重建,
+          下一首预取因 peek 目标变化由订阅方作废。
+        """
+        if self._pending_inserts:
+            position = max(self._pending_inserts) + 1
+        elif self._index >= 0:
+            position = self._index + 1
+        else:
+            position = 0
+        self._items.insert(position, song)
+        self._history = [h + 1 if h >= position else h for h in self._history]
+        self._pending_inserts = [
+            p + 1 if p >= position else p for p in self._pending_inserts
+        ] + [position]
+        self.queue_changed.emit()
+        return position
 
     def set_mode(self, mode: PlayMode) -> None:
         if mode is self._mode:
@@ -261,11 +291,15 @@ class PlayQueue(QObject):
     # -- 内部 ----------------------------------------------------------------
 
     def _set_current(self, index: int) -> None:
-        """设置当前曲并记录历史(截断游标之后的旧前进分支)。"""
+        """设置当前曲并记录历史(截断游标之后的旧前进分支)。
+
+        已播到/跳过的插播条目出队(索引 <= 新当前曲的不再等待按序接播)。
+        """
         self._index = index
         self._history = self._history[: self._history_pos + 1]
         self._history.append(index)
         self._history_pos = len(self._history) - 1
+        self._pending_inserts = [p for p in self._pending_inserts if p > index]
         self.current_changed.emit(index)
 
     def _pick_shuffle_next(self) -> int:

@@ -1,10 +1,11 @@
-"""设置页(M3 最小实现 + M4 外观/关于 + M5 音质偏好):
+"""设置页(M3 最小实现 + M4 外观/关于 + M5 音质偏好 + 最近列表数量):
 关闭行为 / 播放 / 音质 / 外观 / 关于。
 
 控件组只做控件,改动即时发信号给 MainWindow(由其持久化到 settings.json
 并应用);程序化回填(set_xxx)时屏蔽信号避免回环。M4 增加外观(暗色/
 亮色,信号同样交 MainWindow 切主题)与关于(版本 / GPL-3.0 / 上游标注)。
-M5 增加音质偏好(网易云档位键,B站侧解析时换算),默认无损保持既有行为。
+M5 增加音质偏好(网易云档位键,B站侧解析时换算),默认无损保持既有行为;
+最近列表数量(侧栏「最近」分区条数,默认 8)。
 """
 
 from __future__ import annotations
@@ -16,11 +17,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QRadioButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from .. import __version__
+from ..data.store import DEFAULT_RECENT_MAX, MAX_RECENT_MAX, MIN_RECENT_MAX
 from . import theme
 
 _CLOSE_EXIT = "exit"
@@ -52,6 +55,7 @@ class SettingsPage(QWidget):
     play_mode_changed = Signal(str)
     appearance_changed = Signal(str)  # "dark" | "light"
     quality_changed = Signal(str)  # "lossless" | "exhigh" | "standard"
+    recent_max_changed = Signal(int)  # 「最近」分区条数(1~50)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -66,13 +70,27 @@ class SettingsPage(QWidget):
         close_layout.addStretch(1)
 
         mode_group = QGroupBox("播放")
+        mode_layout_parent = QVBoxLayout(mode_group)
+        mode_layout = QHBoxLayout()
         self.mode_combo = QComboBox()
         for label, value in _MODE_ITEMS:
             self.mode_combo.addItem(label, userData=value)
-        mode_layout = QHBoxLayout(mode_group)
         mode_layout.addWidget(QLabel("播放模式:"))
         mode_layout.addWidget(self.mode_combo)
         mode_layout.addStretch(1)
+        mode_layout_parent.addLayout(mode_layout)
+
+        self.recent_max_spin = QSpinBox()
+        self.recent_max_spin.setRange(MIN_RECENT_MAX, MAX_RECENT_MAX)
+        self.recent_max_spin.setValue(DEFAULT_RECENT_MAX)
+        self.recent_max_spin.setToolTip(
+            "侧栏「最近」分区记录的最近播放列表条数;\n缩小即时裁剪存量,扩大不回填已裁条目"
+        )
+        recent_layout = QHBoxLayout()
+        recent_layout.addWidget(QLabel("最近列表数量:"))
+        recent_layout.addWidget(self.recent_max_spin)
+        recent_layout.addStretch(1)
+        mode_layout_parent.addLayout(recent_layout)
 
         quality_group = QGroupBox("音质")
         self.quality_combo = QComboBox()
@@ -126,6 +144,7 @@ class SettingsPage(QWidget):
         self.quality_combo.currentIndexChanged.connect(
             self._on_quality_index_changed
         )
+        self.recent_max_spin.valueChanged.connect(self.recent_max_changed.emit)
 
         # 默认勾选与持久化默认一致(close_action 默认 tray)
         self.tray_radio.setChecked(True)
@@ -195,3 +214,8 @@ class SettingsPage(QWidget):
                 self.quality_combo.setCurrentIndex(index)
                 self.quality_combo.blockSignals(False)
                 return
+
+    def set_recent_max(self, value: int) -> None:
+        self.recent_max_spin.blockSignals(True)
+        self.recent_max_spin.setValue(value)
+        self.recent_max_spin.blockSignals(False)

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from neriplayer_win.api.netease import (
     build_quality_candidates,
     build_qr_account_params,
@@ -305,3 +307,98 @@ class TestSplitUserPlaylists:
         groups = split_user_playlists(items, user_id=1)
         assert [p.id for p in groups.created] == [1]
         assert groups.subscribed == []
+
+
+class TestRecommendedSongsParsing:
+    """每日推荐响应解析:回退链对照参考实现 firstSongArray,条目字段
+    复用 _parse_song_item(ar/al/dt);301 抛登录失效。"""
+
+    @staticmethod
+    def _song_json(song_id: int) -> dict:
+        return {
+            "id": song_id,
+            "name": f"歌曲{song_id}",
+            "ar": [{"name": f"歌手{song_id}"}],
+            "al": {"picUrl": "http://p.example/cover.jpg"},
+            "dt": 210000,
+        }
+
+    def test_daily_songs_shape(self):
+        from neriplayer_win.api.netease import parse_recommended_songs_response
+
+        raw = json.dumps(
+            {
+                "code": 200,
+                "data": {"dailySongs": [self._song_json(1), self._song_json(2)]},
+            }
+        )
+        songs = parse_recommended_songs_response(raw)
+        assert [s.id for s in songs] == [1, 2]
+        assert songs[0].title == "歌曲1"
+        assert songs[0].artist == "歌手1"
+        assert songs[0].duration_ms == 210000
+        assert songs[0].cover_url == "http://p.example/cover.jpg"
+
+    def test_fallback_shapes(self):
+        """推荐类接口歌曲数组落位不同:逐级回退探测。"""
+        from neriplayer_win.api.netease import first_recommended_song_array
+
+        assert first_recommended_song_array(
+            {"data": {"dailySongs": [1], "songs": [2]}}
+        ) == [1]  # dailySongs 优先
+        assert first_recommended_song_array({"data": {"songs": [2]}}) == [2]
+        assert first_recommended_song_array({"data": [3]}) == [3]
+        assert first_recommended_song_array({"result": [4]}) == [4]
+        assert first_recommended_song_array({"songs": [5]}) == [5]
+        assert first_recommended_song_array({"playlist": {"tracks": [6]}}) == [6]
+        assert first_recommended_song_array({"code": 200}) == []
+        assert first_recommended_song_array({"data": {"foo": 1}}) == []
+
+    def test_artists_fallback_field(self):
+        """旧字段 artists(无 ar)也能取到歌手名(对齐参考实现)。"""
+        from neriplayer_win.api.netease import parse_recommended_songs_response
+
+        raw = json.dumps(
+            {
+                "code": 200,
+                "data": {
+                    "dailySongs": [
+                        {
+                            "id": 7,
+                            "name": "老字段",
+                            "artists": [{"name": "歌手甲"}, {"name": "歌手乙"}],
+                            "duration": 1000,
+                        }
+                    ]
+                },
+            }
+        )
+        songs = parse_recommended_songs_response(raw)
+        assert songs[0].artist == "歌手甲 / 歌手乙"
+
+    def test_code_301_raises_auth_required(self):
+        from neriplayer_win.api.netease import (
+            NeteaseAuthRequiredError,
+            parse_recommended_songs_response,
+        )
+
+        with pytest.raises(NeteaseAuthRequiredError):
+            parse_recommended_songs_response(json.dumps({"code": 301}))
+
+    def test_bad_code_raises(self):
+        from neriplayer_win.api.netease import (
+            NeteaseApiError,
+            parse_recommended_songs_response,
+        )
+
+        with pytest.raises(NeteaseApiError, match="code=405"):
+            parse_recommended_songs_response(json.dumps({"code": 405}))
+
+    def test_invalid_json_raises(self):
+        from neriplayer_win.api.netease import (
+            NeteaseApiError,
+            parse_recommended_songs_response,
+        )
+
+        with pytest.raises(NeteaseApiError):
+            parse_recommended_songs_response("not-json")

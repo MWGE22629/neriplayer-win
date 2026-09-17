@@ -94,3 +94,25 @@ def test_resolve_public_song_url_smoke():
         assert playable.level
     finally:
         client.close()
+
+
+@pytest.mark.skipif(_SKIP, reason="NERIPLAYER_SKIP_NETWORK=1")
+def test_daily_recommended_songs_anonymous_smoke():
+    """每日推荐需要登录:匿名下应得到 301(登录失效异常)而非管线错误。
+
+    验证端点可达 + weapi 管线可用;已登录的真实响应形状由本机登录态
+    离屏冒烟人工验证(与 B站收藏夹同策略,见 TODO.md)。
+    """
+    client = _make_client()
+    try:
+        songs = client.get_daily_recommended_songs()
+    except NeteaseAuthRequiredError:
+        client.close()
+        return  # 匿名 301:预期路径
+    except NeteaseApiError as error:
+        client.close()
+        pytest.skip(f"网络不可用,跳过冒烟: {error}")
+    try:
+        assert isinstance(songs, list)  # 万一服务端放行匿名,解析也不应崩
+    finally:
+        client.close()

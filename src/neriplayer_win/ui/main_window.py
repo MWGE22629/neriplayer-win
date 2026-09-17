@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMenu,
     QStackedWidget,
     QSplitter,
     QSystemTrayIcon,
@@ -43,11 +44,14 @@ from ..api.netease import (
     NeteaseUserPlaylists,
 )
 from ..data.store import (
+    DEFAULT_RECENT_MAX,
     SETTING_APPEARANCE,
     SETTING_BILI_FOLDER_ORDER,
     SETTING_NETEASE_PLAYLIST_ORDER,
     SETTING_NETEASE_SUBSCRIBED_ORDER,
     SETTING_PLAY_QUALITY,
+    SETTING_RECENT_LISTS,
+    SETTING_RECENT_MAX,
     SETTING_SIDEBAR_EXPANDED,
     LocalStore,
     apply_stored_order,
@@ -94,6 +98,7 @@ _HEADER_SECTION = {
     "netease-header": "netease",
     "netease-subscribed-header": "netease-subscribed",
     "bili-header": "bili",
+    "recent-header": "recent",
 }
 
 # M5 实际生效音质展示:网易云 level → 状态栏中文(覆盖 QUALITY_FALLBACK_ORDER
@@ -150,6 +155,24 @@ def _bili_item_to_queue(avid: int, bvid: str, title: str, upper: str, duration_s
         artist=sanitize_ui_text(upper), duration_ms=duration_sec * 1000,
         cover_url=cover_url,
     )
+
+
+@dataclass(frozen=True)
+class _ListRef:
+    """一次「可浏览可播放的列表」的标识:侧栏条目、表格上下文、最近栈共用。
+
+    kind 取 data.store.RECENT_KINDS 白名单;固定虚拟列表(稍后再看/
+    每日推荐)id 恒 0,以 kind 区分。title 为不带计数的干净名字
+    (最近栈展示与状态栏提示用,计数会过期故不存)。
+    """
+
+    kind: str
+    id: int
+    title: str
+
+
+# 每日推荐:固定虚拟列表(歌曲由推荐接口直接返回,无歌单 id)
+_DAILY_REF = _ListRef(kind="netease-daily", id=0, title="每日推荐")
 
 
 @dataclass
@@ -345,17 +368,22 @@ class _SidebarTree(QTreeWidget):
 
 
 class MainWindow(QMainWindow):
-    """主窗口:左侧导航(网易云自建/收藏歌单 + B站收藏夹/稍后再看)
+    """主窗口:左侧导航(最近 + 网易云自建/收藏歌单 + B站收藏夹/稍后再看)
     + 歌曲列表 + 播放条。
 
-    播放队列 self._queue 持有统一条目(来源标记 netease/bili),双击列表、
-    队列窗口切跳与自动接播都经 _play_at 按条目来源分发解析,两平台共用
-    播放条。播放模式(顺序/随机/单曲循环)由 PlayQueue 管理;B站播放地址
-    加载失败时按 backupUrls 候选轮换重试(_on_load_failed);各类播放失败
-    统一走 _handle_play_failure:非阻塞提示(状态栏+托盘气泡)+ 延时自动
-    跳下一首 + 连续失败熔断;解析请求用代际 token 作废过期回调(新点歌
-    可覆盖旧请求,弱网下不卡死)。起播成功后顺手后台预取下一首的播放地址
-    (peek_next 语义,顺序/单曲模式),切歌命中预取槽即零网络等待起播。
+    表格(浏览的列表)与播放队列解耦:侧栏点击只把列表装进表格,双击表格
+    才把该列表装入 self._queue 起播;右键「下一首播放」把表格里点中的歌
+    插到队列当前曲之后(insert_next,按点击顺序累积),不替换队列其余
+    部分。成功起播时把队列来源列表压入「最近」栈(仅浏览不计)。
+
+    播放队列持有统一条目(来源标记 netease/bili),双击列表、队列窗口
+    切跳与自动接播都经 _play_at 按条目来源分发解析,两平台共用播放条。
+    播放模式(顺序/随机/单曲循环)由 PlayQueue 管理;B站播放地址加载
+    失败时按 backupUrls 候选轮换重试(_on_load_failed);各类播放失败统一
+    走 _handle_play_failure:非阻塞提示(状态栏+托盘气泡)+ 延时自动跳
+    下一首 + 连续失败熔断;解析请求用代际 token 作废过期回调(新点歌
+    可覆盖旧请求,弱网下不卡死)。起播成功后顺手后台预取下一首的播放
+    地址(peek_next 语义,顺序/单曲模式),切歌命中预取槽即零网络起播。
     """
 
     def __init__(self) -> None:
@@ -378,6 +406,19 @@ class MainWindow(QMainWindow):
         self._bili_watchlater_count: int | None = None
 
         self._queue = PlayQueue(mode=PlayMode(self._settings.get("play_mode", "sequence")))
+        # 表格(浏览的列表)与播放队列解耦:侧栏点击只浏览,双击表格才把
+        # 该列表装入队列起播;右键「下一首播放」在队列当前曲后插播。
+        # _table_context/_queue_context 记录两边各自的列表来源(_ListRef),
+        # _queue_dirty 标记队列因插播偏离其来源列表(此时双击同列表也需重装)。
+        self._table_songs: list[QueueSong] = []
+        self._table_context: _ListRef | None = None
+        self._queue_context: _ListRef | None = None
+        self._queue_dirty = False
+        # 「最近」栈(新→旧):起播成功时压栈,仅浏览不计
+        self._recent: list[_ListRef] = [
+            _ListRef(kind=entry["kind"], id=entry["id"], title=entry["title"])
+            for entry in self._settings.get(SETTING_RECENT_LISTS, [])
+        ]
         # 解析代际:每次进入 _play_at 自增,旧代际的解析回调一律作废。
         # 弱网下一次解析可挂 40s+(httpx 超时 × 音质回退链串行请求),
         # 必须允许新点歌覆盖旧请求,故不再用单一 _resolving 标志拦截。
@@ -412,6 +453,9 @@ class MainWindow(QMainWindow):
         self.song_table.verticalHeader().setVisible(False)
         self.song_table.setAlternatingRowColors(True)
         self.song_table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        # 右键「下一首播放」(插播不换队列)
+        self.song_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.song_table.customContextMenuRequested.connect(self._on_table_context_menu)
 
         # 空态视图与歌曲表同页切换:表空显示居中提示,有内容显示表
         self._empty_state = _EmptyStateView()
@@ -573,9 +617,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"已登录:{account.nickname or account.user_id}")
         self._rebuild_sidebar()
         self.central_stack.setCurrentIndex(_PAGE_TABLE)
-        self.song_table.setRowCount(0)
-        self._update_table_empty_state()
+        self._clear_table()
         self._queue.replace([])
+        self._queue_context = None
+        self._queue_dirty = False
         self._load_playlists()
 
     def _handle_stale_login(self, message: str) -> None:
@@ -585,6 +630,9 @@ class MainWindow(QMainWindow):
         self._playlists = []
         self._subscribed_playlists = []
         self._queue.replace([])
+        self._queue_context = None
+        self._queue_dirty = False
+        self._clear_table()
         self._rebuild_sidebar()
         self.central_stack.setCurrentIndex(_PAGE_LOGIN)
         self.login_page.start()
@@ -690,25 +738,47 @@ class MainWindow(QMainWindow):
         )
         self._rebuild_sidebar()
 
-    def _load_playlist_tracks(self, playlist_id: int, title: str) -> None:
-        self.song_table.setRowCount(0)
-        self._update_table_empty_state()
-        self.statusBar().showMessage(f"正在加载:{title}")
+    def _load_playlist_tracks(self, list_ref: _ListRef) -> None:
+        """加载网易云歌单(自建/收藏)到表格;只浏览不换队列。"""
+        self._clear_table()
+        self.statusBar().showMessage(f"正在加载:{list_ref.title}")
 
         def fetch() -> object:
-            return self._client.get_playlist_tracks(playlist_id)
+            return self._client.get_playlist_tracks(list_ref.id)
 
         def on_done(songs) -> None:
             if not isinstance(songs, list):
                 return
-            self._table_header = _HEADER_NETEASE
-            # 切换列表即重置队列(保留既有行为):当前曲/历史清空
-            self._queue.replace([_netease_song_to_queue(s) for s in songs])
-            self._fill_song_table()
-            self.statusBar().showMessage(f"{title} · 共 {len(songs)} 首")
+            self._set_table_songs(
+                [_netease_song_to_queue(s) for s in songs], _HEADER_NETEASE, list_ref
+            )
+            self.statusBar().showMessage(f"{list_ref.title} · 共 {len(songs)} 首")
 
         def on_error(message: str) -> None:
             self.statusBar().showMessage(f"加载歌曲失败:{message}")
+
+        run_async(fetch, on_done=on_done, on_error=on_error)
+
+    # -- 网易云每日推荐 --------------------------------------------------------
+
+    def _load_netease_daily(self) -> None:
+        """每日推荐歌曲(参考实现 getDailyRecommendedSongs);只浏览不换队列。"""
+        self._clear_table()
+        self.statusBar().showMessage(f"正在加载:{_DAILY_REF.title}")
+
+        def fetch() -> object:
+            return self._client.get_daily_recommended_songs()
+
+        def on_done(songs) -> None:
+            if not isinstance(songs, list):
+                return
+            self._set_table_songs(
+                [_netease_song_to_queue(s) for s in songs], _HEADER_NETEASE, _DAILY_REF
+            )
+            self.statusBar().showMessage(f"{_DAILY_REF.title} · 共 {len(songs)} 首")
+
+        def on_error(message: str) -> None:
+            self.statusBar().showMessage(f"加载每日推荐失败:{message}")
 
         run_async(fetch, on_done=on_done, on_error=on_error)
 
@@ -751,47 +821,46 @@ class MainWindow(QMainWindow):
         self._rebuild_sidebar()
         self.statusBar().showMessage(f"B站收藏夹 · 共 {len(folders)} 个")
 
-    def _show_bili_items(self, items: list, title: str) -> None:
-        """B站条目列表(收藏夹/稍后再看共用)填表入队并提示。"""
+    def _show_bili_items(self, items: list, list_ref: _ListRef) -> None:
+        """B站条目列表(收藏夹/稍后再看共用)填表;只浏览不换队列。"""
         playable = [item for item in items if item.playable]
-        self._table_header = _HEADER_BILI
-        # 切换列表即重置队列(保留既有行为)
-        self._queue.replace(
+        self._set_table_songs(
             [
                 _bili_item_to_queue(
                     item.id, item.bvid or "", item.title or "", item.upper_name,
                     item.duration_sec, item.cover_url,
                 )
                 for item in playable
-            ]
+            ],
+            _HEADER_BILI,
+            list_ref,
         )
-        self._fill_song_table()
         skipped = len(items) - len(playable)
         suffix = f"(跳过 {skipped} 条不可播内容)" if skipped else ""
-        self.statusBar().showMessage(f"{title} · 共 {len(playable)} 首{suffix}")
+        self.statusBar().showMessage(
+            f"{list_ref.title} · 共 {len(playable)} 首{suffix}"
+        )
 
-    def _load_bili_folder_tracks(self, media_id: int, title: str) -> None:
-        self.song_table.setRowCount(0)
-        self._update_table_empty_state()
-        self.statusBar().showMessage(f"正在加载:{title}")
+    def _load_bili_folder_tracks(self, list_ref: _ListRef) -> None:
+        self._clear_table()
+        self.statusBar().showMessage(f"正在加载:{list_ref.title}")
 
         def fetch() -> object:
-            return self._bili_client.get_all_fav_folder_items(media_id)
+            return self._bili_client.get_all_fav_folder_items(list_ref.id)
 
         def on_done(items) -> None:
             if not isinstance(items, list):
                 return
-            self._show_bili_items(items, title)
+            self._show_bili_items(items, list_ref)
 
         def on_error(message: str) -> None:
             self.statusBar().showMessage(f"加载收藏夹失败:{message}")
 
         run_async(fetch, on_done=on_done, on_error=on_error)
 
-    def _load_bili_watch_later(self, title: str) -> None:
-        self.song_table.setRowCount(0)
-        self._update_table_empty_state()
-        self.statusBar().showMessage(f"正在加载:{title}")
+    def _load_bili_watch_later(self, list_ref: _ListRef) -> None:
+        self._clear_table()
+        self.statusBar().showMessage(f"正在加载:{list_ref.title}")
 
         def fetch() -> object:
             return self._bili_client.get_watch_later_items()
@@ -801,7 +870,7 @@ class MainWindow(QMainWindow):
                 return
             # 稍后再看变化频繁:每次打开都刷新侧栏计数
             self._bili_watchlater_count = len(items)
-            self._show_bili_items(items, title)
+            self._show_bili_items(items, list_ref)
             self._rebuild_sidebar()
 
         def on_error(message: str) -> None:
@@ -857,6 +926,16 @@ class MainWindow(QMainWindow):
     def _rebuild_sidebar(self) -> None:
         self.sidebar.blockSignals(True)
         self.sidebar.clear()
+        # 「最近」分区:跨平台聚合最近播放过的列表,非空才出现
+        # (空分区只有占位噪音,首次起播后自然浮现)
+        if self._recent:
+            recent_header = self._add_header_item("最近", None, "recent-header")
+            for ref in self._recent:
+                self._add_child_item(
+                    recent_header, sanitize_ui_text(ref.title), "recent-item",
+                    (ref.kind, ref.id, ref.title),
+                )
+
         netease_header = self._add_header_item(
             "网易云 · 歌单", self._brand_header_icon("netease"), "netease-header"
         )
@@ -881,6 +960,10 @@ class MainWindow(QMainWindow):
             subscribed_header = self._add_header_item(
                 "网易云 · 收藏", self._brand_header_icon("netease"),
                 "netease-subscribed-header",
+            )
+            # 每日推荐:固定首位(与 B站稍后再看同策略,不参与拖拽排序)
+            self._add_child_item(
+                subscribed_header, _DAILY_REF.title, "netease-daily", None
             )
             for playlist in self._subscribed_playlists:
                 title = sanitize_ui_text(playlist.name)
@@ -943,6 +1026,7 @@ class MainWindow(QMainWindow):
         "netease-login": "search",
         "netease-playlist": "library_music",
         "netease-subscribed-playlist": "favorite",
+        "netease-daily": "refresh",
         "bili-login": "person",
         "bili-watchlater": "playlist_play",
         "bili-folder": "queue_music",
@@ -965,12 +1049,53 @@ class MainWindow(QMainWindow):
         brand_source = self._HEADER_BRAND.get(kind)
         if brand_source is not None:
             item.setIcon(0, self._section_header_icon(brand_source, item.isExpanded()))
+        elif kind == "recent-header":
+            # 「最近」分区头:history 单色标 + 折叠三角(无品牌标可挂)
+            item.setIcon(
+                0, self._monochrome_header_icon("history", item.isExpanded())
+            )
         else:
-            icon_name = self._SIDEBAR_KIND_ICON.get(kind)
+            # 「最近」子节点按来源类型取图标(payload=(来源 kind, id, title))
+            if kind == "recent-item" and isinstance(role[1], tuple):
+                icon_name = self._SIDEBAR_KIND_ICON.get(role[1][0])
+            else:
+                icon_name = self._SIDEBAR_KIND_ICON.get(kind)
             if icon_name:
                 item.setIcon(0, tinted_icon(icon_name))
         for row in range(item.childCount()):
             self._apply_item_icons(item.child(row))
+
+    def _sidebar_list_ref(self, kind: str, payload, item: QTreeWidgetItem) -> _ListRef:
+        """侧栏条目 → _ListRef;标题取内存里的干净名字(侧栏文本带计数,
+        计数会过期,最近栈与状态栏提示都不想带它),查不到回落条目文本。"""
+        entry_id = int(payload) if isinstance(payload, int) else 0
+        if kind == "netease-playlist":
+            for playlist in self._playlists:
+                if playlist.id == entry_id:
+                    return _ListRef(kind, entry_id, playlist.name)
+        elif kind == "netease-subscribed-playlist":
+            for playlist in self._subscribed_playlists:
+                if playlist.id == entry_id:
+                    return _ListRef(kind, entry_id, playlist.name)
+        elif kind == "bili-folder":
+            for folder in self._bili_folders:
+                if folder.media_id == entry_id:
+                    return _ListRef(kind, entry_id, folder.title)
+        elif kind == "bili-watchlater":
+            return _ListRef("bili-watchlater", 0, "稍后再看")
+        return _ListRef(kind, entry_id, item.text(0))
+
+    def _open_list_ref(self, list_ref: _ListRef) -> None:
+        """按列表来源分发加载(侧栏原生条目与「最近」条目共用)。"""
+        self.central_stack.setCurrentIndex(_PAGE_TABLE)
+        if list_ref.kind in ("netease-playlist", "netease-subscribed-playlist"):
+            self._load_playlist_tracks(list_ref)
+        elif list_ref.kind == "netease-daily":
+            self._load_netease_daily()
+        elif list_ref.kind == "bili-folder":
+            self._load_bili_folder_tracks(list_ref)
+        elif list_ref.kind == "bili-watchlater":
+            self._load_bili_watch_later(list_ref)
 
     def _on_sidebar_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
         role = item.data(0, Qt.ItemDataRole.UserRole)
@@ -987,21 +1112,27 @@ class MainWindow(QMainWindow):
             return
         if kind in ("netease-playlist", "netease-subscribed-playlist"):
             # 自建与收藏歌单走同一展开/播放路径(歌单详情接口对两者一致)
-            self.central_stack.setCurrentIndex(_PAGE_TABLE)
-            self._load_playlist_tracks(int(payload), item.text(0))
+            self._open_list_ref(self._sidebar_list_ref(kind, payload, item))
+            return
+        if kind == "netease-daily":
+            self._open_list_ref(_DAILY_REF)
             return
         if kind == "bili-folder":
-            self.central_stack.setCurrentIndex(_PAGE_TABLE)
-            self._load_bili_folder_tracks(int(payload), item.text(0))
+            self._open_list_ref(self._sidebar_list_ref(kind, payload, item))
             return
         if kind == "bili-watchlater":
-            self.central_stack.setCurrentIndex(_PAGE_TABLE)
-            self._load_bili_watch_later(item.text(0))
+            self._open_list_ref(self._sidebar_list_ref(kind, payload, item))
+            return
+        if kind == "recent-item":
+            # payload = (来源 kind, id, 干净标题):按来源分发,加载失败
+            # (远端已删/未登录)由各加载器的错误路径提示
+            if isinstance(payload, tuple) and len(payload) == 3:
+                origin_kind, entry_id, title = payload
+                self._open_list_ref(_ListRef(origin_kind, int(entry_id), str(title)))
             return
         if kind == "bili-login":
             self.central_stack.setCurrentIndex(_PAGE_TABLE)
-            self.song_table.setRowCount(0)
-            self._update_table_empty_state()
+            self._clear_table()
             self._handle_bili_section_click()
             return
         # 加载占位等不可选条目不动作(等价旧行为:不可选中即不触发分发)
@@ -1025,7 +1156,8 @@ class MainWindow(QMainWindow):
         False: [(4.5, 2.0), (4.5, 10.0), (8.5, 6.0)],
     }
 
-    def _arrow_pixmap(self, expanded: bool) -> QPixmap:
+    @staticmethod
+    def _arrow_pixmap(expanded: bool) -> QPixmap:
         """折叠指示三角:主题灰、2x DPR 抗锯齿;不走字体(DirectWrite 回退
         字体会带来 ~50MB 常驻内存,见 _SidebarTree 注释)。"""
         dpr = 2.0
@@ -1038,18 +1170,31 @@ class MainWindow(QMainWindow):
         color.setAlpha(200)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
-        painter.drawPolygon(QPolygonF([QPointF(x, y) for x, y in self._ARROW_POINTS[expanded]]))
+        painter.drawPolygon(
+            QPolygonF([QPointF(x, y) for x, y in MainWindow._ARROW_POINTS[expanded]])
+        )
         painter.end()
         return pix
 
     def _section_header_icon(self, source: str, expanded: bool) -> QIcon:
         """分区头图标 = 品牌标(18px)+ 右侧折叠三角,合成在 30x18 画布。"""
-        brand = self._brand_header_icon(source).pixmap(QSize(18, 18))
+        return self._composite_header_icon(
+            self._brand_header_icon(source).pixmap(QSize(18, 18)), expanded
+        )
+
+    def _monochrome_header_icon(self, icon_name: str, expanded: bool) -> QIcon:
+        """无品牌标的分区头(「最近」):主题色单色标 + 折叠三角。"""
+        return self._composite_header_icon(
+            tinted_icon(icon_name).pixmap(QSize(18, 18)), expanded
+        )
+
+    @staticmethod
+    def _composite_header_icon(base: QPixmap, expanded: bool) -> QIcon:
         canvas = QPixmap(30, 18)
         canvas.fill(Qt.GlobalColor.transparent)
         painter = QPainter(canvas)
-        painter.drawPixmap(0, 0, brand)
-        painter.drawPixmap(18, 3, self._arrow_pixmap(expanded))
+        painter.drawPixmap(0, 0, base)
+        painter.drawPixmap(18, 3, MainWindow._arrow_pixmap(expanded))
         painter.end()
         return QIcon(canvas)
 
@@ -1132,8 +1277,24 @@ class MainWindow(QMainWindow):
             else:
                 self._empty_state.set_hint("从左侧选择歌单或收藏夹,双击即可播放")
 
+    def _clear_table(self) -> None:
+        """清空表格与浏览上下文(切列表/登出时的加载中状态)。"""
+        self._table_songs = []
+        self._table_context = None
+        self.song_table.setRowCount(0)
+        self._update_table_empty_state()
+
+    def _set_table_songs(
+        self, songs: list[QueueSong], header: list[str], context: _ListRef | None
+    ) -> None:
+        """把一个列表的歌曲填进表格(仅浏览;装入播放队列走双击)。"""
+        self._table_header = header
+        self._table_songs = songs
+        self._table_context = context
+        self._fill_song_table()
+
     def _fill_song_table(self) -> None:
-        songs = self._queue.items()
+        songs = self._table_songs
         self.song_table.setHorizontalHeaderLabels(self._table_header)
         self.song_table.setRowCount(len(songs))
         for row, song in enumerate(songs):
@@ -1153,7 +1314,42 @@ class MainWindow(QMainWindow):
     # -- 播放 ----------------------------------------------------------------
 
     def _on_cell_double_clicked(self, row: int, _column: int) -> None:
+        self._play_from_table(row)
+
+    def _play_from_table(self, row: int) -> None:
+        """双击表格行起播:浏览的列表 ≠ 队列来源(或队列已被插播改写)时,
+        先把表格列表整体装入队列(即「切到该列表播放」),再跳到所点行。
+
+        同列表且未插播时等价旧行为的纯 jump(保留随机模式已播历史)。
+        """
+        if not (0 <= row < len(self._table_songs)):
+            return
+        if self._table_context != self._queue_context or self._queue_dirty:
+            self._queue.replace(list(self._table_songs))
+            self._queue_context = self._table_context
+            self._queue_dirty = False
         self._play_at(row)
+
+    def _on_table_context_menu(self, pos) -> None:
+        """歌曲表右键菜单:「下一首播放」(插到当前曲后,不动队列其余部分)。"""
+        row = self.song_table.indexAt(pos).row()
+        if not (0 <= row < len(self._table_songs)):
+            return
+        menu = QMenu(self.song_table)
+        play_next_action = menu.addAction("下一首播放")
+        chosen = menu.exec(self.song_table.viewport().mapToGlobal(pos))
+        if chosen is play_next_action:
+            self._insert_next_from_table(row)
+
+    def _insert_next_from_table(self, row: int) -> None:
+        song = self._table_songs[row]
+        position = self._queue.insert_next(song)
+        # 队列偏离其来源列表:再双击同列表也需重装(replace 回净表内容)
+        self._queue_dirty = True
+        # queue_changed 订阅方会作废下一首预取(peek 目标已变成插播曲)
+        self.statusBar().showMessage(
+            f"下一首播放:{song.title}(队列第 {position + 1} 位)"
+        )
 
     def _play_at(self, index: int) -> None:
         # 代际与跳歌 token 自增放在最前:任何新的点歌都作废仍在途的旧解析
@@ -1304,7 +1500,36 @@ class MainWindow(QMainWindow):
         self.player_bar.set_active(True)
         self.statusBar().showMessage(status or f"正在播放:{song.title}")
         self.engine.play_url(url, headers)
+        self._push_recent()  # 成功起播才算「听过」(仅浏览不压栈)
         self._schedule_prefetch_next()  # 起播成功:顺手后台预取下一首
+
+    # -- 「最近」列表 ------------------------------------------------------------
+
+    def _push_recent(self) -> None:
+        """把队列来源列表压入最近栈(新→旧):去重置顶、标题刷新、按上限截断。
+
+        仅当栈内容实际变化才落盘+重建侧栏(同一列表连播时栈顶不变,
+        不刷侧栏避免每首歌重建一次)。
+        """
+        context = self._queue_context
+        if context is None:
+            return
+        entry = _ListRef(kind=context.kind, id=context.id, title=context.title)
+        remaining = [
+            ref for ref in self._recent if (ref.kind, ref.id) != (entry.kind, entry.id)
+        ]
+        max_entries = int(
+            self._settings.get(SETTING_RECENT_MAX, DEFAULT_RECENT_MAX)
+        )
+        updated = [entry, *remaining][:max_entries]
+        if updated == self._recent:
+            return
+        self._recent = updated
+        self._settings[SETTING_RECENT_LISTS] = [
+            {"kind": ref.kind, "id": ref.id, "title": ref.title} for ref in updated
+        ]
+        self._store.save_settings(self._settings)
+        self._rebuild_sidebar()
 
     def _schedule_prefetch_next(self) -> None:
         """预取下一首的播放地址(run_async 后台,UI 线程零网络铁律)。
@@ -1509,6 +1734,19 @@ class MainWindow(QMainWindow):
         self._settings[SETTING_PLAY_QUALITY] = value
         self._store.save_settings(self._settings)
 
+    def _on_settings_recent_max(self, value: int) -> None:
+        """设置页「最近列表数量」:持久化并即刻裁剪存量栈(缩小即时生效,
+        扩大不回填——被裁掉的条目已经丢了)。"""
+        self._settings[SETTING_RECENT_MAX] = value
+        if len(self._recent) > value:
+            self._recent = self._recent[:value]
+            self._settings[SETTING_RECENT_LISTS] = [
+                {"kind": ref.kind, "id": ref.id, "title": ref.title}
+                for ref in self._recent
+            ]
+        self._store.save_settings(self._settings)
+        self._rebuild_sidebar()
+
     def _on_settings_appearance(self, value: str) -> None:
         """设置页外观选择:持久化并即时切换主题。"""
         if value not in theme.VALID_THEMES:
@@ -1532,10 +1770,14 @@ class MainWindow(QMainWindow):
         page.play_mode_changed.connect(self._on_settings_play_mode)
         page.appearance_changed.connect(self._on_settings_appearance)
         page.quality_changed.connect(self._on_settings_play_quality)
+        page.recent_max_changed.connect(self._on_settings_recent_max)
         page.set_close_action(self._settings.get("close_action", "tray"))
         page.set_play_mode(self._settings.get("play_mode", "sequence"))
         page.set_appearance(self._settings.get(SETTING_APPEARANCE, "dark"))
         page.set_quality(self._settings.get(SETTING_PLAY_QUALITY, "lossless"))
+        page.set_recent_max(
+            self._settings.get(SETTING_RECENT_MAX, DEFAULT_RECENT_MAX)
+        )
 
     # -- 队列窗口 --------------------------------------------------------------
 
