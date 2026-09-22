@@ -4,7 +4,7 @@ import sys
 import time
 from dataclasses import dataclass
 
-from PySide6.QtCore import QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QDropEvent, QIcon, QPainter, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -16,6 +16,9 @@ from PySide6.QtWidgets import (
     QMenu,
     QStackedWidget,
     QSplitter,
+    QStyledItemDelegate,
+    QStyle,
+    QStyleOptionViewItem,
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
@@ -60,10 +63,11 @@ from ..player.engine import PlayerEngine, PlayerEngineError
 from ..player.queue import BackupUrlRotator, PlayMode, PlayQueue, QueueSong
 from . import theme
 from .browser_login import BILI_WEB_LOGIN, BrowserLoginDialog
+from .covers import CoverLoader
 from .icons import app_icon, tinted_icon, tinted_icon_with_color, tray_icon
 from .login_page import LoginPage
 from .media_keys import MediaKeyHandler
-from .player_bar import PlayerBar, format_seconds
+from .player_bar import PlayerBar, format_seconds, rounded_pixmap
 from .queue_window import QueueWindow
 from .settings_page import SettingsPage
 from .theme import ThemeManager
@@ -75,8 +79,22 @@ _PAGE_LOGIN = 0
 _PAGE_TABLE = 1
 _PAGE_SETTINGS = 2
 
-_HEADER_NETEASE = ["#", "标题", "歌手", "时长"]
-_HEADER_BILI = ["#", "标题", "UP主", "时长"]
+_HEADER_NETEASE = ["#", "", "标题", "歌手", "时长"]
+_HEADER_BILI = ["#", "", "标题", "UP主", "时长"]
+
+# 序号列(默认 100px)减半腾出的宽度给封面缩略图列,总占位不变。
+_TABLE_COL_NUMBER = 0
+_TABLE_COL_COVER = 1
+_TABLE_NUMBER_WIDTH = 50
+_TABLE_COVER_WIDTH = 50
+# 缩略图为播放条封面(40px)的 50% 缩放;圆角随尺寸等比(播放条 8/40)。
+_TABLE_COVER_SIZE = 20
+_TABLE_COVER_RADIUS = 4
+# 固定行高:缩略图到达前后行高一致,加载过程中列表不跳动
+_TABLE_ROW_HEIGHT = 32
+# 成品 QIcon 缓存条数上限(FIFO 淘汰):item.setIcon 存的是自己的副本,
+# 淘汰只影响"下次进表要不要重解码",不动正在显示的行
+_TABLE_ICON_CACHE_MAX = 1024
 
 _MODE_CYCLE = (PlayMode.SEQUENCE, PlayMode.SHUFFLE, PlayMode.REPEAT_ONE)
 
@@ -235,6 +253,43 @@ class _EmptyStateView(QWidget):
         color.setAlpha(120)  # 淡色:约半透明
         self.icon_label.setPixmap(
             tinted_icon_with_color(self._icon_name, color).pixmap(QSize(48, 48))
+        )
+
+
+class _CoverColumnDelegate(QStyledItemDelegate):
+    """歌曲表封面列:背景(选中/交替行)照默认绘制,icon 画在格子正中。
+
+    空文本 item 的 decoration 走通用布局,实测固定偏左约 4px,
+    20px 缩略图在 50px 列里左右留白不对称;该列只有 icon,居中自画最稳。
+    """
+
+    def paint(self, painter, option, index) -> None:  # noqa: N802 - Qt 命名
+        view_option = QStyleOptionViewItem(option)
+        self.initStyleOption(view_option, index)
+        size = view_option.decorationSize
+        # icon 必须从 model 取:PySide6 中 view_option.icon 取出的引用与
+        # 成员共享,下面把成员置空画纯背景时会连带清掉它
+        icon = index.data(Qt.ItemDataRole.DecorationRole)
+        view_option.icon = QIcon()
+        view_option.text = ""
+        widget = view_option.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        style.drawControl(
+            QStyle.ControlElement.CE_ItemViewItem, view_option, painter, widget
+        )
+        if not isinstance(icon, QIcon) or icon.isNull():
+            return
+        device = painter.device()
+        dpr = device.devicePixelRatioF() if device is not None else 1.0
+        pixmap = icon.pixmap(size, dpr)
+        painter.drawPixmap(
+            QRect(
+                option.rect.x() + (option.rect.width() - size.width()) // 2,
+                option.rect.y() + (option.rect.height() - size.height()) // 2,
+                size.width(),
+                size.height(),
+            ),
+            pixmap,
         )
 
 
@@ -430,6 +485,11 @@ class MainWindow(QMainWindow):
         # 后台解析下一首,切歌命中即零网络等待起播;切歌单/换模式即作废。
         self._prefetched: _PrefetchedPlay | None = None
         self._table_header = _HEADER_NETEASE
+        # 歌曲表封面缩略图:预取与播放条各用各的 CoverLoader 实例,
+        # 磁盘缓存按 URL 共享(列表预取过的歌播放秒出图,反之亦然)
+        self._cover_loader = CoverLoader(self)
+        self._cover_loader.cover_ready.connect(self._on_table_cover_ready)
+        self._cover_icons: dict[str, QIcon] = {}
 
         try:
             self.engine = PlayerEngine()
@@ -443,11 +503,25 @@ class MainWindow(QMainWindow):
         self.login_page = LoginPage(self._client)
         self.login_page.login_succeeded.connect(self._on_login_succeeded)
 
-        self.song_table = QTableWidget(0, 4)
+        self.song_table = QTableWidget(0, 5)
         self.song_table.setHorizontalHeaderLabels(_HEADER_NETEASE)
-        self.song_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.Stretch
+        header = self.song_table.horizontalHeader()
+        # 序号列与封面列固定 50px(原序号列默认 100px 的一半),标题列 Stretch
+        header.setSectionResizeMode(
+            _TABLE_COL_NUMBER, QHeaderView.ResizeMode.Fixed
         )
+        header.setSectionResizeMode(
+            _TABLE_COL_COVER, QHeaderView.ResizeMode.Fixed
+        )
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.song_table.setColumnWidth(_TABLE_COL_NUMBER, _TABLE_NUMBER_WIDTH)
+        self.song_table.setColumnWidth(_TABLE_COL_COVER, _TABLE_COVER_WIDTH)
+        self.song_table.setIconSize(QSize(_TABLE_COVER_SIZE, _TABLE_COVER_SIZE))
+        self.song_table.setItemDelegateForColumn(
+            _TABLE_COL_COVER, _CoverColumnDelegate(self.song_table)
+        )
+        # 缩略图未到时行高即取最终值,渐进显示不引起行高跳动
+        self.song_table.verticalHeader().setDefaultSectionSize(_TABLE_ROW_HEIGHT)
         self.song_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.song_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.song_table.verticalHeader().setVisible(False)
@@ -1293,6 +1367,7 @@ class MainWindow(QMainWindow):
         self._table_songs = []
         self._table_context = None
         self.song_table.setRowCount(0)
+        self._cover_loader.preload([])  # 作废仍在途的缩略图预取
         self._update_table_empty_state()
 
     def _set_table_songs(
@@ -1313,14 +1388,51 @@ class MainWindow(QMainWindow):
             number.setTextAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             )
-            self.song_table.setItem(row, 0, number)
-            self.song_table.setItem(row, 1, QTableWidgetItem(song.title))
-            self.song_table.setItem(row, 2, QTableWidgetItem(song.artist))
+            self.song_table.setItem(row, _TABLE_COL_NUMBER, number)
+            # 封面缩略图:无 icon 的空 item 即透明占位,预取回来后 setIcon
+            self.song_table.setItem(row, _TABLE_COL_COVER, QTableWidgetItem())
+            self.song_table.setItem(row, 2, QTableWidgetItem(song.title))
+            self.song_table.setItem(row, 3, QTableWidgetItem(song.artist))
             duration = (
                 format_seconds(song.duration_ms / 1000) if song.duration_ms else "--:--"
             )
-            self.song_table.setItem(row, 3, QTableWidgetItem(duration))
+            self.song_table.setItem(row, 4, QTableWidgetItem(duration))
+        self._preload_table_covers()
         self._update_table_empty_state()
+
+    # -- 表格封面缩略图 -----------------------------------------------------
+
+    def _preload_table_covers(self) -> None:
+        """按行序把整表封面交给预取池;切表再调即作废上一批(空表亦然)。"""
+        self._cover_loader.preload([song.cover_url for song in self._table_songs])
+
+    def _on_table_cover_ready(self, url: str, data: bytes) -> None:
+        """缩略图到达:当前表没有该 URL(切表后迟到的回调)直接丢弃。"""
+        rows = [
+            row for row, song in enumerate(self._table_songs)
+            if song.cover_url == url
+        ]
+        if not rows:
+            return
+        icon = self._cover_icons.get(url)
+        if icon is None:
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(data):
+                return
+            dpr = self.song_table.devicePixelRatioF()
+            physical = max(1, round(_TABLE_COVER_SIZE * dpr))
+            pixmap = rounded_pixmap(
+                pixmap, physical, max(1, round(_TABLE_COVER_RADIUS * dpr))
+            )
+            pixmap.setDevicePixelRatio(dpr)
+            icon = QIcon(pixmap)
+            if len(self._cover_icons) >= _TABLE_ICON_CACHE_MAX:
+                self._cover_icons.pop(next(iter(self._cover_icons)), None)
+            self._cover_icons[url] = icon
+        for row in rows:
+            item = self.song_table.item(row, _TABLE_COL_COVER)
+            if item is not None:
+                item.setIcon(icon)
 
     # -- 播放 ----------------------------------------------------------------
 
