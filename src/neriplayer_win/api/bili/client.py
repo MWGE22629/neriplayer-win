@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import html
 import json
 import math
 import re
@@ -61,6 +62,7 @@ NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
 FINGERPRINT_URL = "https://api.bilibili.com/x/frontend/finger/spi"
 WEB_TICKET_URL = "https://api.bilibili.com/bapis/bilibili.api.ticket.v1.Ticket/GenWebTicket"
 VIEW_URL = "https://api.bilibili.com/x/web-interface/wbi/view"
+SEARCH_TYPE_URL = "https://api.bilibili.com/x/web-interface/wbi/search/type"
 FAV_FOLDER_CREATED_LIST_ALL = "https://api.bilibili.com/x/v3/fav/folder/created/list-all"
 FAV_FOLDER_CREATED_LIST = "https://api.bilibili.com/x/v3/fav/folder/created/list"
 FAV_RESOURCE_LIST = "https://api.bilibili.com/x/v3/fav/resource/list"
@@ -625,6 +627,54 @@ def parse_watch_later_response(root: Mapping[str, Any]) -> list[BiliFavItem]:
     return items
 
 
+def _strip_search_highlight(title: str) -> str:
+    """搜索标题剥 <em> 高亮标签并还原 HTML 实体(对应 stripHtml)。"""
+    return html.unescape(re.sub(r"<[^>]+>", "", title))
+
+
+def _parse_duration_text(text: str) -> int:
+    """"mm:ss" / "h:mm:ss" → 秒;非数字输入返回 0。"""
+    parts = text.strip().split(":")
+    if 2 <= len(parts) <= 3 and all(part.isdigit() for part in parts):
+        seconds = 0
+        for part in parts:
+            seconds = seconds * 60 + int(part)
+        return seconds
+    return 0
+
+
+def parse_search_video_response(
+    root: Mapping[str, Any], page: int
+) -> tuple[list[BiliFavItem], bool]:
+    """对应 searchVideos 的响应解析:data.result[] → BiliFavItem。
+
+    字段对照参考实现:aid/bvid/title(带 <em> 高亮)/author/pic/
+    duration("mm:ss")/type(仅保留 "video");分页判定 page < numPages,
+    numPages 缺失时按本页非空粗判。
+    """
+    data = root.get("data") if isinstance(root.get("data"), dict) else {}
+    results = data.get("result") if isinstance(data.get("result"), list) else []
+    items: list[BiliFavItem] = []
+    for m in results:
+        if not isinstance(m, dict) or _opt_str(m, "type") != "video":
+            continue
+        items.append(
+            BiliFavItem(
+                type=2,
+                id=_opt_long_or_none(m, "aid") or 0,
+                bvid=_opt_str(m, "bvid").strip() or None,
+                title=_strip_search_highlight(_opt_str(m, "title")),
+                cover_url=ensure_https(_opt_str(m, "pic")),
+                intro="",
+                duration_sec=_parse_duration_text(_opt_str(m, "duration")),
+                upper_name=_opt_str(m, "author"),
+            )
+        )
+    num_pages = _opt_int(data, "numPages", 0)
+    has_more = page < num_pages if num_pages else bool(items)
+    return items, has_more
+
+
 def parse_page_list_response(root: Mapping[str, Any]) -> list[BiliVideoPage]:
     """对应 parsePageListResponse(data 为数组)。"""
     data = root.get("data") if isinstance(root.get("data"), list) else []
@@ -1041,6 +1091,34 @@ class BiliClient:
                 )
             raise BiliApiError(f"获取稍后再看失败: {message}(code={code})", code=code)
         return parse_watch_later_response(root)
+
+    # -- 搜索(对应 wbi/search/type) ------------------------------------------
+
+    def search_videos_raw(self, keyword: str, page: int = 1) -> str:
+        """对应 searchVideos(GET,Wbi 加签;order/duration/tids 取参考实现默认)。"""
+        url = self.sign_wbi_url(
+            SEARCH_TYPE_URL,
+            {
+                "search_type": "video",
+                "keyword": keyword,
+                "order": "totalrank",
+                "duration": "0",
+                "tids": "0",
+                "page": str(page),
+            },
+        )
+        return self._execute_get_as_text(url)
+
+    def search_videos(
+        self, keyword: str, page: int = 1
+    ) -> tuple[list[BiliFavItem], bool]:
+        """关键词搜视频(音频视角);返回 (条目列表, 是否还有下一页)。"""
+        root = self._parse_json(self.search_videos_raw(keyword, page))
+        code = _opt_int(root, "code", -1)
+        if code != 0:
+            message = _opt_str(root, "message") or _opt_str(root, "msg")
+            raise BiliApiError(f"搜索失败: {message}(code={code})", code=code)
+        return parse_search_video_response(root, page)
 
     # -- 视频基础信息(对应 wbi/view 与 pagelist) ------------------------------
 

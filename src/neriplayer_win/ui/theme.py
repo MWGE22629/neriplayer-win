@@ -304,6 +304,42 @@ QPushButton#playButton:disabled {
     background: @surfaceHighest;
 }
 
+/* 搜索来源栏:M3 主标签行风格(借鉴移动端 PrimaryScrollableTabRow)——
+   底色透明,选中不铺色,只靠顶部指示线与 primary 文字色 */
+QPushButton#searchSourceBtn {
+    background: transparent;
+    color: @onSurfaceVariant;
+    border: none;
+    border-radius: 0;
+    font-size: 15px;
+}
+QPushButton#searchSourceBtn:hover {
+    background: @surfaceHigh;
+    color: @onSurface;
+}
+QPushButton#searchSourceBtn:checked {
+    background: transparent;
+    color: @primary;
+    font-weight: 600;
+}
+QPushButton#searchSourceBtn:checked:hover {
+    background: @surfaceHigh;
+}
+#searchSourceIndicator {
+    background: @primary;
+    border-radius: 1px;
+}
+QPushButton#searchMoreBtn {
+    background: transparent;
+    color: @primary;
+    border: none;
+    border-radius: 0;
+    font-size: 13px;
+}
+QPushButton#searchMoreBtn:hover {
+    background: @surfaceContainer;
+}
+
 /* ---- 滑条 --------------------------------------------------------------- */
 QSlider {
     background: transparent;
@@ -346,6 +382,20 @@ QLineEdit {
     selection-color: @onSecondaryContainer;
 }
 QLineEdit:focus {
+    border: 1px solid @primary;
+}
+/* 搜索框(两行高,半宽居中):胶囊造型,字号随高度放大 */
+QLineEdit#searchInput {
+    background: @surfaceContainer;
+    border: 1px solid @outlineVariant;
+    border-radius: 14px;
+    padding: 8px 16px;
+    font-size: 15px;
+    color: @onSurface;
+    selection-background-color: @secondaryContainer;
+    selection-color: @onSecondaryContainer;
+}
+QLineEdit#searchInput:focus {
     border: 1px solid @primary;
 }
 QComboBox {
@@ -503,6 +553,9 @@ def build_qss(theme: Mapping[str, str]) -> str:
 # ---------------------------------------------------------------------------
 
 _current_name: str = DEFAULT_THEME
+# 已实际写入 QApplication 的主题;None = 进程还没写过——冷启动即使
+# 就是默认主题(名字未变)也必须写一次 QSS,不能按"未变化"跳过
+_applied_name: str | None = None
 
 
 def current_theme_name() -> str:
@@ -533,17 +586,26 @@ class ThemeManager(QObject):
         return build_qss(PALETTES[self._name])
 
     def apply(self, name: str) -> None:
-        """切换主题并即时重渲;名字不变时仅确保 QSS 已应用,不发信号。"""
+        """切换主题并即时重渲;主题未变且 QSS 已写过时跳过重设。
+
+        setStyleSheet 会 re-polish 进程内全部存活控件,成本随控件数
+        线性增长——同主题重复调用(每新建一个窗口都会 apply 一次)
+        直接跳过,避免同进程多窗口构造耗时超线性劣化;但进程首次
+        应用(哪怕主题就是默认值)必须真正写一次,否则整套样式缺失。
+        """
         if name not in VALID_THEMES:
             raise ValueError(f"未知主题:{name!r}(可选:{VALID_THEMES})")
-        changed = name != self._name
+        global _current_name, _applied_name
+        changed = name != _current_name
         self._name = name
-        global _current_name
         _current_name = name
+        if not changed and _applied_name == name:
+            return
         from PySide6.QtWidgets import QApplication
 
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(self.qss())
+            _applied_name = name
         if changed:
             self.theme_changed.emit(name)

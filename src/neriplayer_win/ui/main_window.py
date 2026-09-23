@@ -4,16 +4,28 @@ import sys
 import time
 from dataclasses import dataclass
 
-from PySide6.QtCore import QPointF, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QEasingCurve,
+    QPointF,
+    QPropertyAnimation,
+    QRect,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QColor, QDropEvent, QIcon, QPainter, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
+    QPushButton,
     QStackedWidget,
     QSplitter,
     QStyledItemDelegate,
@@ -95,6 +107,13 @@ _TABLE_ROW_HEIGHT = 32
 # 成品 QIcon 缓存条数上限(FIFO 淘汰):item.setIcon 存的是自己的副本,
 # 淘汰只影响"下次进表要不要重解码",不动正在显示的行
 _TABLE_ICON_CACHE_MAX = 1024
+
+# 搜索页:输入框(半宽居中)与来源栏(网易云|B站 各半宽)均为两行高;
+# 结果落现有歌曲表,双击播放/右键插播/封面缩略图全复用
+_SEARCH_BAR_HEIGHT = _TABLE_ROW_HEIGHT * 2
+_SEARCH_PAGE_SIZE = 30  # 对齐参考实现 NETEASE_SEARCH_PAGE_SIZE
+# 「最近」栈里搜索条目的标题前缀,回放时剥掉还原关键词
+_SEARCH_TITLE_PREFIX = "搜索:"
 
 _MODE_CYCLE = (PlayMode.SEQUENCE, PlayMode.SHUFFLE, PlayMode.REPEAT_ONE)
 
@@ -293,6 +312,53 @@ class _CoverColumnDelegate(QStyledItemDelegate):
         )
 
 
+class _SourceBar(QWidget):
+    """搜索来源栏:网易云|B站 平铺两半,顶部一条滑动指示线代表选中。
+
+    借鉴移动端 PrimaryScrollableTabRow(M3 主标签行):底色透明,
+    选中不铺满颜色,只有 primary 色指示线贴着选中页签文字宽居中,
+    切换来源时线滑动过去(250ms OutCubic)。
+    """
+
+    def __init__(
+        self,
+        netease_button: QPushButton,
+        bili_button: QPushButton,
+        on_layout_changed,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(netease_button, 1)
+        layout.addWidget(bili_button, 1)
+        self.indicator = QWidget(self)
+        self.indicator.setObjectName("searchSourceIndicator")
+        self.indicator.setFixedHeight(3)
+        self.indicator.setGeometry(0, 0, 0, 3)
+        self._on_layout_changed = on_layout_changed
+        self._animation = QPropertyAnimation(self.indicator, b"geometry", self)
+        self._animation.setDuration(250)
+        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def move_indicator(self, geometry: QRect, animate: bool) -> None:
+        self._animation.stop()
+        if animate:
+            self._animation.setEndValue(geometry)
+            self._animation.start()
+        else:
+            self.indicator.setGeometry(geometry)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().resizeEvent(event)
+        self._on_layout_changed()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().showEvent(event)
+        self._on_layout_changed()
+
+
 class _SidebarTree(QTreeWidget):
     """侧栏树(M5):四分区顶层项(网易云歌单/网易云收藏/B站/设置)+ 分区内子节点。
 
@@ -485,6 +551,13 @@ class MainWindow(QMainWindow):
         # 后台解析下一首,切歌命中即零网络等待起播;切歌单/换模式即作废。
         self._prefetched: _PrefetchedPlay | None = None
         self._table_header = _HEADER_NETEASE
+        # 搜索状态:来源/关键词/已加载页数/是否还有下一页;generation 防串号
+        # (切来源/新搜索/退出搜索模式都自增,旧回调一律作废)
+        self._search_source = "netease"
+        self._search_keyword = ""
+        self._search_page = 0
+        self._search_has_more = False
+        self._search_generation = 0
         # 歌曲表封面缩略图:预取与播放条各用各的 CoverLoader 实例,
         # 磁盘缓存按 URL 共享(列表预取过的歌播放秒出图,反之亦然)
         self._cover_loader = CoverLoader(self)
@@ -537,12 +610,72 @@ class MainWindow(QMainWindow):
         self.table_stack.addWidget(self.song_table)  # 0
         self.table_stack.addWidget(self._empty_state)  # 1
 
+        # 搜索页头:输入框(半宽居中,两行高)+ 来源栏(网易云|B站 各半宽,
+        # 两行高);只在搜索模式显示,结果直接落下方现有歌曲表
+        self._search_input = QLineEdit()
+        self._search_input.setObjectName("searchInput")
+        self._search_input.setPlaceholderText("搜索关键词")
+        self._search_input.setFixedHeight(_SEARCH_BAR_HEIGHT)
+        self._search_input.setClearButtonEnabled(True)
+        self._search_input.returnPressed.connect(self._on_search_return_pressed)
+        input_row = QHBoxLayout()
+        input_row.addStretch(1)
+        # stretch 1:2:1 → 输入框恰占半宽且居中
+        input_row.addWidget(self._search_input, 2)
+        input_row.addStretch(1)
+
+        self._search_netease_btn = QPushButton("网易云")
+        self._search_bili_btn = QPushButton("B站")
+        for button in (self._search_netease_btn, self._search_bili_btn):
+            button.setObjectName("searchSourceBtn")
+            button.setCheckable(True)
+            button.setFixedHeight(_SEARCH_BAR_HEIGHT)
+        self._search_netease_btn.setChecked(True)
+        self._search_group = QButtonGroup(self)
+        self._search_group.addButton(self._search_netease_btn)
+        self._search_group.addButton(self._search_bili_btn)
+        self._search_netease_btn.clicked.connect(
+            lambda: self._on_search_source_changed("netease")
+        )
+        self._search_bili_btn.clicked.connect(
+            lambda: self._on_search_source_changed("bili")
+        )
+        # 来源栏:M3 主标签行风格,顶部滑动指示线代表选中
+        self._source_bar = _SourceBar(
+            self._search_netease_btn,
+            self._search_bili_btn,
+            on_layout_changed=lambda: self._update_source_indicator(animate=False),
+        )
+        self._source_indicator = self._source_bar.indicator
+
+        self._search_header = QWidget()
+        header_layout = QVBoxLayout(self._search_header)
+        header_layout.setContentsMargins(16, 16, 16, 8)
+        header_layout.setSpacing(8)
+        header_layout.addLayout(input_row)
+        header_layout.addWidget(self._source_bar)
+        self._search_header.setVisible(False)
+
+        self._search_more_btn = QPushButton("加载更多")
+        self._search_more_btn.setObjectName("searchMoreBtn")
+        self._search_more_btn.setFixedHeight(_TABLE_ROW_HEIGHT + 8)
+        self._search_more_btn.clicked.connect(self._on_search_more_clicked)
+        self._search_more_btn.setVisible(False)
+
+        table_page = QWidget()
+        table_layout = QVBoxLayout(table_page)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        table_layout.setSpacing(0)
+        table_layout.addWidget(self._search_header)
+        table_layout.addWidget(self.table_stack, 1)
+        table_layout.addWidget(self._search_more_btn)
+
         self.settings_page = SettingsPage()
         self._wire_settings_page()
 
         self.central_stack = QStackedWidget()
         self.central_stack.addWidget(self.login_page)  # 0
-        self.central_stack.addWidget(self.table_stack)  # 1
+        self.central_stack.addWidget(table_page)  # 1
         self.central_stack.addWidget(self.settings_page)  # 2
 
         # -- 侧栏 -------------------------------------------------------------
@@ -1000,6 +1133,14 @@ class MainWindow(QMainWindow):
     def _rebuild_sidebar(self) -> None:
         self.sidebar.blockSignals(True)
         self.sidebar.clear()
+        # 「搜索」入口:固定最顶(「最近」之上),图标复用移动端放大镜
+        search_item = QTreeWidgetItem(["搜索"])
+        search_item.setFlags(
+            Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
+        )
+        search_item.setData(0, Qt.ItemDataRole.UserRole, ("search", None))
+        self.sidebar.addTopLevelItem(search_item)
+
         # 「最近」分区:跨平台聚合最近播放过的列表,非空才出现
         # (空分区只有占位噪音,首次起播后自然浮现)
         if self._recent:
@@ -1096,6 +1237,7 @@ class MainWindow(QMainWindow):
         self._apply_sidebar_icons()
 
     _SIDEBAR_KIND_ICON = {
+        "search": "search",
         "settings": "settings",
         "netease-login": "search",
         "netease-playlist": "library_music",
@@ -1161,6 +1303,8 @@ class MainWindow(QMainWindow):
 
     def _open_list_ref(self, list_ref: _ListRef) -> None:
         """按列表来源分发加载(侧栏原生条目与「最近」条目共用)。"""
+        # 浏览实体列表即退出搜索模式(搜索分支会在下方重新进入)
+        self._set_search_mode(False)
         self.central_stack.setCurrentIndex(_PAGE_TABLE)
         if list_ref.kind in ("netease-playlist", "netease-subscribed-playlist"):
             self._load_playlist_tracks(list_ref)
@@ -1170,6 +1314,11 @@ class MainWindow(QMainWindow):
             self._load_bili_folder_tracks(list_ref)
         elif list_ref.kind == "bili-watchlater":
             self._load_bili_watch_later(list_ref)
+        elif list_ref.kind == "search":
+            # 「最近」里的搜索条目回放:标题剥前缀还原关键词重搜
+            self._open_search_page(
+                list_ref.title.removeprefix(_SEARCH_TITLE_PREFIX)
+            )
 
     def _on_sidebar_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
         role = item.data(0, Qt.ItemDataRole.UserRole)
@@ -1180,6 +1329,9 @@ class MainWindow(QMainWindow):
             return
         if kind == "settings":
             self.central_stack.setCurrentIndex(_PAGE_SETTINGS)
+            return
+        if kind == "search":
+            self._open_search_page()
             return
         if kind == "netease-login":
             self.central_stack.setCurrentIndex(_PAGE_LOGIN)
@@ -1206,6 +1358,7 @@ class MainWindow(QMainWindow):
             return
         if kind == "bili-login":
             self.central_stack.setCurrentIndex(_PAGE_TABLE)
+            self._set_search_mode(False)
             self._clear_table()
             self._handle_bili_section_click()
             return
@@ -1433,6 +1586,143 @@ class MainWindow(QMainWindow):
             item = self.song_table.item(row, _TABLE_COL_COVER)
             if item is not None:
                 item.setIcon(icon)
+
+    # -- 搜索 ----------------------------------------------------------------
+
+    def _open_search_page(self, keyword: str = "") -> None:
+        """进入搜索模式(显示页头);带关键词时直接执行一次搜索。"""
+        self.central_stack.setCurrentIndex(_PAGE_TABLE)
+        self._set_search_mode(True)
+        if keyword and keyword != self._search_keyword:
+            self._search_input.setText(keyword)
+        if keyword:
+            self._run_search(keyword, reset=True)
+        elif not self._table_songs:
+            self._empty_state.set_hint("输入关键词,回车搜索")
+        self._search_input.setFocus()
+        self._search_input.selectAll()
+
+    def _set_search_mode(self, active: bool) -> None:
+        """页头与「加载更多」只在搜索模式出现;退出即作废在途搜索。"""
+        if not active:
+            self._search_generation += 1
+        self._search_header.setVisible(active)
+        self._search_more_btn.setVisible(active and self._search_has_more)
+
+    def _on_search_return_pressed(self) -> None:
+        keyword = self._search_input.text().strip()
+        if not keyword:
+            self.statusBar().showMessage("请输入搜索关键词")
+            return
+        self._run_search(keyword, reset=True)
+
+    def _on_search_source_changed(self, source: str) -> None:
+        """切换来源:同步按钮态与指示线;已有关键词时立即按新来源重搜。"""
+        if source == self._search_source:
+            return
+        self._search_source = source
+        self._search_netease_btn.setChecked(source == "netease")
+        self._search_bili_btn.setChecked(source == "bili")
+        self._update_source_indicator(animate=True)
+        if self._search_keyword:
+            self._run_search(self._search_keyword, reset=True)
+
+    def _update_source_indicator(self, animate: bool = True) -> None:
+        """指示线贴选中按钮、按文字宽居中(布局变化即时对位,切换时滑动)。"""
+        button = (
+            self._search_bili_btn
+            if self._search_source == "bili"
+            else self._search_netease_btn
+        )
+        text_width = button.fontMetrics().horizontalAdvance(button.text())
+        line_width = max(24, min(button.width(), text_width + 28))
+        self._source_bar.move_indicator(
+            QRect(
+                button.x() + (button.width() - line_width) // 2,
+                0,
+                line_width,
+                3,
+            ),
+            animate,
+        )
+
+    def _on_search_more_clicked(self) -> None:
+        self._run_search(self._search_keyword, reset=False)
+
+    def _run_search(self, keyword: str, reset: bool) -> None:
+        """执行/续拉一页搜索;reset=True 重置页码与表格,否则追加。"""
+        self._search_keyword = keyword
+        page = 1 if reset else self._search_page + 1
+        self._search_page = page
+        self._search_generation += 1
+        generation = self._search_generation
+        source = self._search_source
+        if reset:
+            self._clear_table()
+            self._empty_state.set_hint("正在搜索…")
+        self._search_more_btn.setVisible(False)
+        self.statusBar().showMessage(f"正在搜索:{keyword}")
+        if source == "bili":
+            def fetch() -> object:
+                return self._bili_client.search_videos(keyword, page)
+
+            def on_done(result) -> None:
+                if generation != self._search_generation:
+                    return
+                items, has_more = result
+                self._apply_search_page(
+                    [
+                        _bili_item_to_queue(
+                            item.id, item.bvid or "", item.title or "",
+                            item.upper_name, item.duration_sec, item.cover_url,
+                        )
+                        for item in items if item.playable
+                    ],
+                    _HEADER_BILI,
+                    has_more,
+                )
+        else:
+            def fetch() -> object:
+                return self._client.search_songs(
+                    keyword,
+                    limit=_SEARCH_PAGE_SIZE,
+                    offset=(page - 1) * _SEARCH_PAGE_SIZE,
+                )
+
+            def on_done(result) -> None:
+                if generation != self._search_generation:
+                    return
+                songs, total = result
+                self._apply_search_page(
+                    [_netease_song_to_queue(song) for song in songs],
+                    _HEADER_NETEASE,
+                    page * _SEARCH_PAGE_SIZE < total,
+                )
+
+        def on_error(message) -> None:
+            if generation != self._search_generation:
+                return
+            self.statusBar().showMessage(f"搜索失败:{message}")
+            if not self._table_songs:
+                self._empty_state.set_hint("搜索失败,换个关键词试试")
+
+        run_async(fetch, on_done, on_error)
+
+    def _apply_search_page(
+        self, songs: list[QueueSong], header: list[str], has_more: bool
+    ) -> None:
+        """一页搜索结果落表(续拉时与已加载结果合并整表重填,缩略图走缓存)。"""
+        merged = self._table_songs + songs if self._search_page > 1 else songs
+        self._set_table_songs(
+            merged,
+            header,
+            _ListRef("search", 0, f"{_SEARCH_TITLE_PREFIX}{self._search_keyword}"),
+        )
+        self._search_has_more = has_more
+        self._search_more_btn.setVisible(has_more)
+        self.statusBar().showMessage(
+            f"搜索「{self._search_keyword}」· 已加载 {len(merged)} 首"
+        )
 
     # -- 播放 ----------------------------------------------------------------
 
@@ -2032,10 +2322,11 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001 - 退出路径不抛
                 pass
         if self.engine is not None:
-            # 只停播,不 terminate:libmpv 销毁在 Windows 上与事件线程存在
-            # 平台级竞争(随机崩溃),交给进程退出回收,音频已停无副作用
+            # 真退出走 shutdown 安全序列(quit→等事件线程退出→terminate):
+            # 只 stop 会泄漏一个 mpv 事件线程/窗口,同进程多窗口(测试)
+            # 构造耗时超线性劣化(实测 20 窗口 132ms→694ms)
             try:
-                self.engine.stop()
+                self.engine.shutdown()
             except Exception:  # noqa: BLE001 - 退出路径不抛
                 pass
         self._client.close()

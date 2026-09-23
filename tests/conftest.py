@@ -14,6 +14,10 @@ import sys
 
 import pytest
 
+# 默认离屏渲染:测试不弹真窗口(实测 UI 用例约快一倍,且不干扰前台);
+# 需要真实平台(托盘/字体/DWM)跑测试时,先设 QT_QPA_PLATFORM=windows。
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 
 @pytest.fixture(scope="session")
 def qapp():

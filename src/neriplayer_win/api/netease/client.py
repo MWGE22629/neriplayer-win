@@ -831,6 +831,43 @@ class NeteaseClient:
                 songs.append(song)
         return songs
 
+    # -- 搜索 ----------------------------------------------------------------
+
+    def search_songs_raw(self, keyword: str, limit: int = 30, offset: int = 0) -> str:
+        """对应 searchSongs(/weapi/cloudsearch/get/web,type=1 单曲)。"""
+        return self.call_weapi(
+            "/cloudsearch/get/web",
+            {
+                "s": keyword,
+                "type": "1",
+                "limit": str(limit),
+                "offset": str(offset),
+                "total": "true",
+            },
+        )
+
+    def search_songs(
+        self, keyword: str, limit: int = 30, offset: int = 0
+    ) -> tuple[list[NeteaseSong], int]:
+        """关键词搜单曲;返回 (歌曲列表, 命中总数 songCount)。
+
+        响应 result.songs[] 的 ar/al/dt 字段与歌单详情一致,条目复用
+        _parse_song_item(对应 NeteaseSearchSongParser 的单曲分支)。
+        """
+        root = json.loads(self.search_songs_raw(keyword, limit, offset))
+        code = root.get("code", -1)
+        if code != 200:
+            raise NeteaseApiError(f"搜索失败: code={code}")
+        result = root.get("result")
+        if not isinstance(result, dict):
+            raise NeteaseApiError("搜索响应缺少 result 节点")
+        songs: list[NeteaseSong] = []
+        for item in result.get("songs") or []:
+            song = _parse_song_item(item)
+            if song is not None:
+                songs.append(song)
+        return songs, int(result.get("songCount") or 0)
+
     # -- 每日推荐 ------------------------------------------------------------
 
     def get_daily_recommended_songs_raw(self, afresh: bool = False) -> str:

@@ -89,12 +89,40 @@ class TestThemeManager:
         manager = ThemeManager()
         received: list[str] = []
         manager.theme_changed.connect(received.append)
+        # 判重看进程级全局(全局 QSS 只有一份):先复位,
+        # 免受同进程先前测试留下的主题影响
+        theme._current_name = DEFAULT_THEME
+        theme._applied_name = None
         manager.apply(THEME_LIGHT)
         manager.apply(THEME_LIGHT)  # 同名重复应用不发信号
         manager.apply(THEME_DARK)
         assert received == ["light", "dark"]
         # 复位,避免影响同进程其他测试
         manager.apply(DEFAULT_THEME)
+
+    def test_first_apply_with_default_theme_writes_qss(self, qapp, monkeypatch):
+        """回归(v0.6.0 打包验收踩坑):冷启动主题就是默认值(名字未变)
+        也必须真正写入一次 QSS——判重曾只看主题名,默认暗色首启动
+        整套样式丢失(色调/行高/圆角全回退裸默认)。"""
+        monkeypatch.setattr(theme, "_current_name", DEFAULT_THEME)
+        monkeypatch.setattr(theme, "_applied_name", None)
+        qapp.setStyleSheet("")
+        manager = ThemeManager()
+        manager.apply(DEFAULT_THEME)
+        assert qapp.styleSheet().strip() != "", "冷启动默认主题必须写入 QSS"
+        assert theme._applied_name == DEFAULT_THEME
+
+    def test_same_theme_reapply_skips_stylesheet(self, qapp, monkeypatch):
+        """同主题且 QSS 已写过:跳过重设(同进程多窗口的性能保命符)。"""
+        monkeypatch.setattr(theme, "_current_name", DEFAULT_THEME)
+        monkeypatch.setattr(theme, "_applied_name", None)
+        manager = ThemeManager()
+        manager.apply(DEFAULT_THEME)
+        sentinel = qapp.styleSheet()
+        assert sentinel.strip() != ""
+        qapp.setStyleSheet("/* sentinel-kept */")  # 外部改动不被覆盖
+        manager.apply(DEFAULT_THEME)
+        assert qapp.styleSheet() == "/* sentinel-kept */", "重复 apply 不应重写 QSS"
 
     def test_qss_written_to_application(self, qapp):
         manager = ThemeManager()

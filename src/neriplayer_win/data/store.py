@@ -65,13 +65,14 @@ _MAX_RECENT_MAX = 50
 # 公开别名:设置页 SpinBox 的范围与文档共用
 MIN_RECENT_MAX = _MIN_RECENT_MAX
 MAX_RECENT_MAX = _MAX_RECENT_MAX
-# 最近列表的来源种类:网易云自建/收藏歌单、B站收藏夹/稍后再看、每日推荐
+# 最近列表的来源种类:网易云自建/收藏歌单、B站收藏夹/稍后再看、每日推荐、搜索
 RECENT_KINDS = (
     "netease-playlist",
     "netease-subscribed-playlist",
     "bili-folder",
     "bili-watchlater",
     "netease-daily",
+    "search",
 )
 _SIDEBAR_SECTIONS = ("netease", "netease-subscribed", "bili", "recent")
 _SETTING_ID_ORDERS = (
