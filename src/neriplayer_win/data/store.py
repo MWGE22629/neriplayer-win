@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from ..i18n import DEFAULT_LANGUAGE, VALID_LANGUAGES
+
 _DATA_DIR_ENV = "NERIPLAYER_WIN_DATA_DIR"
 _NETEASE_FILE = "netease.json"
 _BILI_FILE = "bili.json"
@@ -38,10 +40,13 @@ _SETTINGS_FILE = "settings.json"
 # netease_playlist_order / netease_subscribed_order / bili_folder_order
 # 记录分区内拖拽排序后的条目 id 顺序(加载时按存储序重排,新条目追加尾部,
 # 存储里已失效的 id 在重排时静默清掉)。
+# 界面语言 language("zh" 中文 / "en" 英文,默认 zh;文案表见 neriplayer_win.i18n)。
 SETTING_CLOSE_ACTION = "close_action"
 SETTING_PLAY_MODE = "play_mode"
 SETTING_APPEARANCE = "appearance"
 SETTING_PLAY_QUALITY = "play_quality"
+SETTING_LANGUAGE = "language"
+SETTING_DYNAMIC_COLOR = "dynamic_color"
 SETTING_SIDEBAR_EXPANDED = "sidebar_expanded"
 SETTING_NETEASE_PLAYLIST_ORDER = "netease_playlist_order"
 SETTING_NETEASE_SUBSCRIBED_ORDER = "netease_subscribed_order"
@@ -56,10 +61,14 @@ DEFAULT_PLAY_MODE = "sequence"
 DEFAULT_APPEARANCE = "dark"
 DEFAULT_PLAY_QUALITY = "lossless"
 DEFAULT_RECENT_MAX = 8
+# 动态取色(M5):播放时从封面提取主色套用动态主题;对齐 Android 端默认开
+DEFAULT_DYNAMIC_COLOR = True
+# 语言代码以 neriplayer_win.i18n 为单一来源,此处沿用本文件命名习惯
 _VALID_CLOSE_ACTIONS = ("exit", "tray")
 _VALID_PLAY_MODES = ("sequence", "shuffle", "repeat_one")
 _VALID_APPEARANCES = ("dark", "light")
 _VALID_PLAY_QUALITIES = ("standard", "exhigh", "lossless")
+_VALID_LANGUAGES = VALID_LANGUAGES
 _MIN_RECENT_MAX = 1
 _MAX_RECENT_MAX = 50
 # 公开别名:设置页 SpinBox 的范围与文档共用
@@ -89,6 +98,8 @@ def default_settings() -> dict[str, Any]:
         SETTING_PLAY_MODE: DEFAULT_PLAY_MODE,
         SETTING_APPEARANCE: DEFAULT_APPEARANCE,
         SETTING_PLAY_QUALITY: DEFAULT_PLAY_QUALITY,
+        SETTING_LANGUAGE: DEFAULT_LANGUAGE,
+        SETTING_DYNAMIC_COLOR: DEFAULT_DYNAMIC_COLOR,
         SETTING_SIDEBAR_EXPANDED: {section: True for section in _SIDEBAR_SECTIONS},
         SETTING_NETEASE_PLAYLIST_ORDER: [],
         SETTING_NETEASE_SUBSCRIBED_ORDER: [],
@@ -370,6 +381,10 @@ class LocalStore:
             merged[SETTING_APPEARANCE] = data[SETTING_APPEARANCE]
         if data.get(SETTING_PLAY_QUALITY) in _VALID_PLAY_QUALITIES:
             merged[SETTING_PLAY_QUALITY] = data[SETTING_PLAY_QUALITY]
+        if data.get(SETTING_LANGUAGE) in _VALID_LANGUAGES:
+            merged[SETTING_LANGUAGE] = data[SETTING_LANGUAGE]
+        if isinstance(data.get(SETTING_DYNAMIC_COLOR), bool):
+            merged[SETTING_DYNAMIC_COLOR] = data[SETTING_DYNAMIC_COLOR]
         merged[SETTING_SIDEBAR_EXPANDED] = _validated_sidebar_expanded(
             data.get(SETTING_SIDEBAR_EXPANDED)
         )
@@ -395,6 +410,10 @@ class LocalStore:
             merged[SETTING_APPEARANCE] = settings[SETTING_APPEARANCE]
         if settings.get(SETTING_PLAY_QUALITY) in _VALID_PLAY_QUALITIES:
             merged[SETTING_PLAY_QUALITY] = settings[SETTING_PLAY_QUALITY]
+        if settings.get(SETTING_LANGUAGE) in _VALID_LANGUAGES:
+            merged[SETTING_LANGUAGE] = settings[SETTING_LANGUAGE]
+        if isinstance(settings.get(SETTING_DYNAMIC_COLOR), bool):
+            merged[SETTING_DYNAMIC_COLOR] = settings[SETTING_DYNAMIC_COLOR]
         merged[SETTING_SIDEBAR_EXPANDED] = _validated_sidebar_expanded(
             settings.get(SETTING_SIDEBAR_EXPANDED)
         )

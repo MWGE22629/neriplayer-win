@@ -3,13 +3,16 @@
 图标由 MainWindow 注入(M4 起为 assets/tray_*.png 深浅两版,随主题
 切换;build_placeholder_icon 保留为资产缺失时的运行时回退)。
 菜单含 播放/暂停、上一首、下一首、显示主窗口、退出(始终真退出)。
+菜单文案走 i18n,语言切换时 retranslate 重设(动作对象保持不变)。
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import QObject, QPointF, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QPolygonF
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap, QPolygonF
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
+
+from ..i18n import tr
 
 
 def build_placeholder_icon() -> QIcon:
@@ -43,22 +46,35 @@ class TrayController(QObject):
     def __init__(self, icon: QIcon, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._menu = QMenu()
-        action_toggle = self._menu.addAction("播放 / 暂停")
-        action_toggle.triggered.connect(self.toggle_play_requested.emit)
-        action_prev = self._menu.addAction("上一首")
-        action_prev.triggered.connect(self.prev_requested.emit)
-        action_next = self._menu.addAction("下一首")
-        action_next.triggered.connect(self.next_requested.emit)
+        self._action_toggle = QAction(tr("tray.toggle"), self._menu)
+        self._action_toggle.triggered.connect(self.toggle_play_requested.emit)
+        self._menu.addAction(self._action_toggle)
+        self._action_prev = QAction(tr("tray.prev"), self._menu)
+        self._action_prev.triggered.connect(self.prev_requested.emit)
+        self._menu.addAction(self._action_prev)
+        self._action_next = QAction(tr("tray.next"), self._menu)
+        self._action_next.triggered.connect(self.next_requested.emit)
+        self._menu.addAction(self._action_next)
         self._menu.addSeparator()
-        action_show = self._menu.addAction("显示主窗口")
-        action_show.triggered.connect(self.show_main_requested.emit)
-        action_exit = self._menu.addAction("退出")
-        action_exit.triggered.connect(self.exit_requested.emit)
+        self._action_show = QAction(tr("tray.show_main"), self._menu)
+        self._action_show.triggered.connect(self.show_main_requested.emit)
+        self._menu.addAction(self._action_show)
+        self._action_exit = QAction(tr("tray.exit"), self._menu)
+        self._action_exit.triggered.connect(self.exit_requested.emit)
+        self._menu.addAction(self._action_exit)
 
         self.tray = QSystemTrayIcon(icon, self)
         self.tray.setContextMenu(self._menu)
         self.tray.activated.connect(self._on_activated)
         self.tray.show()
+
+    def retranslate(self) -> None:
+        """语言切换:菜单动作文字重设(动作与信号接线不动)。"""
+        self._action_toggle.setText(tr("tray.toggle"))
+        self._action_prev.setText(tr("tray.prev"))
+        self._action_next.setText(tr("tray.next"))
+        self._action_show.setText(tr("tray.show_main"))
+        self._action_exit.setText(tr("tray.exit"))
 
     def set_icon(self, icon: QIcon) -> None:
         """更换托盘图标(主题切换深/浅版)。"""

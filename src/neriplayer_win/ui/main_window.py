@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import i18n
 from ..api.bili import (
     BiliAccount,
     BiliApiError,
@@ -62,6 +63,8 @@ from ..data.store import (
     DEFAULT_RECENT_MAX,
     SETTING_APPEARANCE,
     SETTING_BILI_FOLDER_ORDER,
+    SETTING_DYNAMIC_COLOR,
+    SETTING_LANGUAGE,
     SETTING_NETEASE_PLAYLIST_ORDER,
     SETTING_NETEASE_SUBSCRIBED_ORDER,
     SETTING_PLAY_QUALITY,
@@ -71,13 +74,16 @@ from ..data.store import (
     LocalStore,
     apply_stored_order,
 )
+from ..i18n import tr
 from ..player.engine import PlayerEngine, PlayerEngineError
 from ..player.queue import BackupUrlRotator, PlayMode, PlayQueue, QueueSong
 from . import theme
-from .browser_login import BILI_WEB_LOGIN, BrowserLoginDialog
+from . import cover_seed
+from .browser_login import BrowserLoginDialog, bili_web_login
 from .covers import CoverLoader
 from .icons import app_icon, tinted_icon, tinted_icon_with_color, tray_icon
 from .login_page import LoginPage
+from .material_color import seed_from_hex
 from .media_keys import MediaKeyHandler
 from .player_bar import PlayerBar, format_seconds, rounded_pixmap
 from .queue_window import QueueWindow
@@ -91,8 +97,14 @@ _PAGE_LOGIN = 0
 _PAGE_TABLE = 1
 _PAGE_SETTINGS = 2
 
-_HEADER_NETEASE = ["#", "", "标题", "歌手", "时长"]
-_HEADER_BILI = ["#", "", "标题", "UP主", "时长"]
+def _header_netease() -> list[str]:
+    """网易云歌曲表表头(语言相关,现算现用)。"""
+    return ["#", "", tr("table.title"), tr("table.artist"), tr("table.duration")]
+
+
+def _header_bili() -> list[str]:
+    """B站条目表表头(语言相关,现算现用)。"""
+    return ["#", "", tr("table.title"), tr("table.upper"), tr("table.duration")]
 
 # 序号列(默认 100px)减半腾出的宽度给封面缩略图列,总占位不变。
 _TABLE_COL_NUMBER = 0
@@ -112,7 +124,8 @@ _TABLE_ICON_CACHE_MAX = 1024
 # 结果落现有歌曲表,双击播放/右键插播/封面缩略图全复用
 _SEARCH_BAR_HEIGHT = _TABLE_ROW_HEIGHT * 2
 _SEARCH_PAGE_SIZE = 30  # 对齐参考实现 NETEASE_SEARCH_PAGE_SIZE
-# 「最近」栈里搜索条目的标题前缀,回放时剥掉还原关键词
+# 「最近」栈里搜索条目的持久化标题前缀(规范数据格式,恒中文,不随界面
+# 语言变——老数据回放剥前缀才不失效);展示前缀走 tr("search.recent_prefix")
 _SEARCH_TITLE_PREFIX = "搜索:"
 
 _MODE_CYCLE = (PlayMode.SEQUENCE, PlayMode.SHUFFLE, PlayMode.REPEAT_ONE)
@@ -138,23 +151,23 @@ _HEADER_SECTION = {
     "recent-header": "recent",
 }
 
-# M5 实际生效音质展示:网易云 level → 状态栏中文(覆盖 QUALITY_FALLBACK_ORDER
+# M5 实际生效音质展示:网易云 level → 文案键(覆盖 QUALITY_FALLBACK_ORDER
 # 全集;未识别的新档位原样显示,避免把官方新增档位吞成「未知」)
-_NETEASE_LEVEL_LABELS = {
-    "lossless": "无损 FLAC",
-    "hires": "Hi-Res",
-    "exhigh": "320K",
-    "higher": "192K",
-    "standard": "128K",
-    "jymaster": "超清母带",
-    "jyeffect": "高清环绕声",
-    "sky": "沉浸环绕声",
+_NETEASE_LEVEL_KEYS = {
+    "lossless": "quality.lossless",
+    "hires": "quality.hires",
+    "exhigh": "quality.exhigh",
+    "higher": "quality.higher",
+    "standard": "quality.standard",
+    "jymaster": "quality.jymaster",
+    "jyeffect": "quality.jyeffect",
+    "sky": "quality.sky",
 }
 
-# B站音轨标签(BiliAudioStreamInfo.quality_tag)→ 中文;None 为普通音轨不显示
-_BILI_QUALITY_TAG_LABELS = {
-    "dolby": "杜比",
-    "hires": "Hi-Res",
+# B站音轨标签(BiliAudioStreamInfo.quality_tag)→ 文案键;None 为普通音轨不显示
+_BILI_QUALITY_TAG_KEYS = {
+    "dolby": "quality.dolby",
+    "hires": "quality.hires",
 }
 
 
@@ -162,14 +175,17 @@ def _netease_quality_suffix(level: str | None) -> str:
     """网易云实际生效音质 → 状态栏后缀;响应缺 level 时无信息可展示,不追加。"""
     if not level:
         return ""
-    return f"({_NETEASE_LEVEL_LABELS.get(level, level)})"
+    key = _NETEASE_LEVEL_KEYS.get(level)
+    label = tr(key) if key is not None else level
+    return f"({label})"
 
 
 def _bili_quality_suffix(stream: BiliAudioStreamInfo) -> str:
     """B站实际生效音质 → 状态栏后缀;比特率未知(0)时无信息可展示,不追加。"""
     if stream.bitrate_kbps <= 0:
         return ""
-    tag = _BILI_QUALITY_TAG_LABELS.get(stream.quality_tag or "")
+    key = _BILI_QUALITY_TAG_KEYS.get(stream.quality_tag or "")
+    tag = tr(key) if key is not None else ""
     parts = [tag, f"{stream.bitrate_kbps}kbps"]
     return f"({' '.join(part for part in parts if part)})"
 
@@ -208,8 +224,10 @@ class _ListRef:
     title: str
 
 
-# 每日推荐:固定虚拟列表(歌曲由推荐接口直接返回,无歌单 id)
-_DAILY_REF = _ListRef(kind="netease-daily", id=0, title="每日推荐")
+# 每日推荐:固定虚拟列表(歌曲由推荐接口直接返回,无歌单 id);
+# 标题随界面语言现算,故用工厂函数而非模块级常量
+def _daily_ref() -> _ListRef:
+    return _ListRef(kind="netease-daily", id=0, title=tr("sidebar.daily"))
 
 
 @dataclass
@@ -514,6 +532,11 @@ class MainWindow(QMainWindow):
 
         self._store = LocalStore()
         self._settings = self._store.load_settings()
+        # 界面语言先于任何控件构造(静态文案在构建时就取当前语言);
+        # 语言变更监听在 UI 全部建好后再注册(_on_language_changed 依赖全套控件)
+        i18n.set_language(
+            self._settings.get(SETTING_LANGUAGE, i18n.DEFAULT_LANGUAGE), notify=False
+        )
         self._client = NeteaseClient()
         self._account: NeteaseAccount | None = None
         self._playlists: list[NeteasePlaylist] = []
@@ -550,7 +573,7 @@ class MainWindow(QMainWindow):
         # 下一曲预取单槽(顺序/单曲模式;随机不可预知不预取):起播成功后
         # 后台解析下一首,切歌命中即零网络等待起播;切歌单/换模式即作废。
         self._prefetched: _PrefetchedPlay | None = None
-        self._table_header = _HEADER_NETEASE
+        self._table_header_source = "netease"
         # 搜索状态:来源/关键词/已加载页数/是否还有下一页;generation 防串号
         # (切来源/新搜索/退出搜索模式都自增,旧回调一律作废)
         self._search_source = "netease"
@@ -563,6 +586,12 @@ class MainWindow(QMainWindow):
         self._cover_loader = CoverLoader(self)
         self._cover_loader.cover_ready.connect(self._on_table_cover_ready)
         self._cover_icons: dict[str, QIcon] = {}
+        # 动态取色(M5):第三实例只喂种子提取,磁盘缓存同源,零额外网络
+        self._seed_loader = CoverLoader(self)
+        self._seed_loader.cover_ready.connect(self._on_seed_cover_ready)
+        self._dynamic_seed: int | None = None  # 当前生效的动态种子(ARGB)
+        self._seed_url = ""  # 提取请求对应的封面 URL(过期回调丢弃用)
+        self._seed_generation = 0  # 切歌/清歌作废在途提取
 
         try:
             self.engine = PlayerEngine()
@@ -577,7 +606,7 @@ class MainWindow(QMainWindow):
         self.login_page.login_succeeded.connect(self._on_login_succeeded)
 
         self.song_table = QTableWidget(0, 5)
-        self.song_table.setHorizontalHeaderLabels(_HEADER_NETEASE)
+        self.song_table.setHorizontalHeaderLabels(_header_netease())
         header = self.song_table.horizontalHeader()
         # 序号列与封面列固定 50px(原序号列默认 100px 的一半),标题列 Stretch
         header.setSectionResizeMode(
@@ -614,7 +643,7 @@ class MainWindow(QMainWindow):
         # 两行高);只在搜索模式显示,结果直接落下方现有歌曲表
         self._search_input = QLineEdit()
         self._search_input.setObjectName("searchInput")
-        self._search_input.setPlaceholderText("搜索关键词")
+        self._search_input.setPlaceholderText(tr("search.placeholder"))
         self._search_input.setFixedHeight(_SEARCH_BAR_HEIGHT)
         self._search_input.setClearButtonEnabled(True)
         self._search_input.returnPressed.connect(self._on_search_return_pressed)
@@ -624,8 +653,8 @@ class MainWindow(QMainWindow):
         input_row.addWidget(self._search_input, 2)
         input_row.addStretch(1)
 
-        self._search_netease_btn = QPushButton("网易云")
-        self._search_bili_btn = QPushButton("B站")
+        self._search_netease_btn = QPushButton(tr("search.source_netease"))
+        self._search_bili_btn = QPushButton(tr("search.source_bili"))
         for button in (self._search_netease_btn, self._search_bili_btn):
             button.setObjectName("searchSourceBtn")
             button.setCheckable(True)
@@ -656,7 +685,7 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self._source_bar)
         self._search_header.setVisible(False)
 
-        self._search_more_btn = QPushButton("加载更多")
+        self._search_more_btn = QPushButton(tr("search.more"))
         self._search_more_btn.setObjectName("searchMoreBtn")
         self._search_more_btn.setFixedHeight(_TABLE_ROW_HEIGHT + 8)
         self._search_more_btn.clicked.connect(self._on_search_more_clicked)
@@ -742,7 +771,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._splitter)
         self._clamp_sidebar_width()
 
-        self.statusBar().showMessage("就绪")
+        self.statusBar().showMessage(tr("common.ready"))
 
         # -- 托盘 / 媒体键 / 队列窗口 ------------------------------------------
         self.setWindowIcon(app_icon())
@@ -759,6 +788,9 @@ class MainWindow(QMainWindow):
         if self.engine is None:
             self.statusBar().showMessage(self._engine_error, 10000)
 
+        # UI 全部就绪:注册语言变更监听(设置页滑块切换 → 全量重翻译)
+        i18n.add_listener(self._on_language_changed)
+
     # -- 启动恢复 ------------------------------------------------------------
 
     def _boot_from_store(self) -> None:
@@ -770,13 +802,13 @@ class MainWindow(QMainWindow):
             self._client.get_login_status,
             on_done=self._on_boot_status,
             on_error=lambda message: self.statusBar().showMessage(
-                f"检查登录态失败:{message}"
+                tr("login.status.check_failed", message=message)
             ),
         )
 
     def _on_boot_status(self, account) -> None:
         if account is None:
-            self._handle_stale_login("登录已过期,请重新登录")
+            self._handle_stale_login(tr("login.status.expired"))
             return
         self._enter_logged_in(account)
 
@@ -789,13 +821,13 @@ class MainWindow(QMainWindow):
             self._bili_client.get_login_status,
             on_done=self._on_bili_boot_status,
             on_error=lambda message: self.statusBar().showMessage(
-                f"检查B站登录态失败:{message}"
+                tr("bili.check_failed", message=message)
             ),
         )
 
     def _on_bili_boot_status(self, account) -> None:
         if account is None:
-            self._handle_bili_stale_login("B站登录已过期,请点击侧栏「B站 · 收藏夹」重新登录")
+            self._handle_bili_stale_login(tr("bili.expired_sidebar"))
             return
         self._enter_bili_logged_in(account)
 
@@ -804,24 +836,26 @@ class MainWindow(QMainWindow):
     def _on_login_succeeded(self, cookies: dict) -> None:
         self._store.save_netease(cookies)
         self._client.set_persisted_cookies(cookies)
-        self.statusBar().showMessage("登录成功,正在获取账号信息…")
+        self.statusBar().showMessage(tr("login.status.success_fetching"))
         run_async(
             self._client.get_login_status,
             on_done=self._on_login_account,
             on_error=lambda message: self.statusBar().showMessage(
-                f"获取账号信息失败:{message}"
+                tr("login.status.account_failed", message=message)
             ),
         )
 
     def _on_login_account(self, account) -> None:
         if account is None:
-            self._handle_stale_login("登录态无效,请重新登录")
+            self._handle_stale_login(tr("login.status.invalid"))
             return
         self._enter_logged_in(account)
 
     def _enter_logged_in(self, account: NeteaseAccount) -> None:
         self._account = account
-        self.statusBar().showMessage(f"已登录:{account.nickname or account.user_id}")
+        self.statusBar().showMessage(
+            tr("login.status.logged_in", name=account.nickname or account.user_id)
+        )
         self._rebuild_sidebar()
         self.central_stack.setCurrentIndex(_PAGE_TABLE)
         self._clear_table()
@@ -848,28 +882,28 @@ class MainWindow(QMainWindow):
     # -- B站登录流程 ----------------------------------------------------------
 
     def _open_bili_login_dialog(self) -> None:
-        dialog = BrowserLoginDialog(BILI_WEB_LOGIN, self)
+        dialog = BrowserLoginDialog(bili_web_login(), self)
         dialog.login_cookie_ready.connect(self._on_bili_cookies)
         dialog.exec()
 
     def _on_bili_cookies(self, cookies: dict) -> None:
         if not cookies.get("SESSDATA"):
-            self.statusBar().showMessage("未检测到B站登录凭据,请重试")
+            self.statusBar().showMessage(tr("bili.no_credentials"))
             return
         self._store.save_bili(cookies)
         self._bili_client.set_cookies(cookies)
-        self.statusBar().showMessage("B站登录成功,正在获取账号信息…")
+        self.statusBar().showMessage(tr("bili.login_success"))
         run_async(
             self._bili_client.get_login_status,
             on_done=self._on_bili_account_loaded,
             on_error=lambda message: self.statusBar().showMessage(
-                f"获取B站账号信息失败:{message}"
+                tr("bili.account_failed", message=message)
             ),
         )
 
     def _on_bili_account_loaded(self, account) -> None:
         if account is None:
-            self._handle_bili_stale_login("B站登录态无效,请重新登录")
+            self._handle_bili_stale_login(tr("bili.login_invalid"))
             return
         self._enter_bili_logged_in(account)
 
@@ -880,7 +914,7 @@ class MainWindow(QMainWindow):
         if cookies:
             self._store.save_bili(cookies, profile={"mid": account.mid, "uname": account.uname})
         self.statusBar().showMessage(
-            f"B站已登录:{account.uname or account.mid},正在读取收藏夹…"
+            tr("bili.logged_in", name=account.uname or account.mid)
         )
         self._rebuild_sidebar()
         self._load_bili_folders()
@@ -897,12 +931,12 @@ class MainWindow(QMainWindow):
     def _handle_bili_section_click(self) -> None:
         """侧栏「B站 · 未登录」被点击:有残留 cookie 先验证,否则弹网页登录。"""
         if self._bili_client.has_login():
-            self.statusBar().showMessage("正在检查B站登录态…")
+            self.statusBar().showMessage(tr("bili.checking"))
             run_async(
                 self._bili_client.get_login_status,
                 on_done=self._on_bili_section_status,
                 on_error=lambda message: self.statusBar().showMessage(
-                    f"检查B站登录态失败:{message}"
+                    tr("bili.check_failed", message=message)
                 ),
             )
         else:
@@ -912,7 +946,7 @@ class MainWindow(QMainWindow):
         if account is not None:
             self._enter_bili_logged_in(account)
             return
-        self._handle_bili_stale_login("B站登录已过期,请重新登录")
+        self._handle_bili_stale_login(tr("bili.expired"))
         self._open_bili_login_dialog()
 
     # -- 网易云歌单 -----------------------------------------------------------
@@ -929,7 +963,7 @@ class MainWindow(QMainWindow):
             fetch,
             on_done=self._on_playlists_loaded,
             on_error=lambda message: self.statusBar().showMessage(
-                f"获取歌单失败:{message}"
+                tr("list.playlists_failed", message=message)
             ),
         )
 
@@ -948,7 +982,7 @@ class MainWindow(QMainWindow):
     def _load_playlist_tracks(self, list_ref: _ListRef) -> None:
         """加载网易云歌单(自建/收藏)到表格;只浏览不换队列。"""
         self._clear_table()
-        self.statusBar().showMessage(f"正在加载:{list_ref.title}")
+        self.statusBar().showMessage(tr("list.loading", title=list_ref.title))
 
         def fetch() -> object:
             return self._client.get_playlist_tracks(list_ref.id)
@@ -957,12 +991,14 @@ class MainWindow(QMainWindow):
             if not isinstance(songs, list):
                 return
             self._set_table_songs(
-                [_netease_song_to_queue(s) for s in songs], _HEADER_NETEASE, list_ref
+                [_netease_song_to_queue(s) for s in songs], "netease", list_ref
             )
-            self.statusBar().showMessage(f"{list_ref.title} · 共 {len(songs)} 首")
+            self.statusBar().showMessage(
+                tr("list.loaded", title=list_ref.title, count=len(songs))
+            )
 
         def on_error(message: str) -> None:
-            self.statusBar().showMessage(f"加载歌曲失败:{message}")
+            self.statusBar().showMessage(tr("list.songs_failed", message=message))
 
         run_async(fetch, on_done=on_done, on_error=on_error)
 
@@ -970,8 +1006,9 @@ class MainWindow(QMainWindow):
 
     def _load_netease_daily(self) -> None:
         """每日推荐歌曲(参考实现 getDailyRecommendedSongs);只浏览不换队列。"""
+        daily_ref = _daily_ref()
         self._clear_table()
-        self.statusBar().showMessage(f"正在加载:{_DAILY_REF.title}")
+        self.statusBar().showMessage(tr("list.loading", title=daily_ref.title))
 
         def fetch() -> object:
             return self._client.get_daily_recommended_songs()
@@ -980,12 +1017,14 @@ class MainWindow(QMainWindow):
             if not isinstance(songs, list):
                 return
             self._set_table_songs(
-                [_netease_song_to_queue(s) for s in songs], _HEADER_NETEASE, _DAILY_REF
+                [_netease_song_to_queue(s) for s in songs], "netease", daily_ref
             )
-            self.statusBar().showMessage(f"{_DAILY_REF.title} · 共 {len(songs)} 首")
+            self.statusBar().showMessage(
+                tr("list.loaded", title=daily_ref.title, count=len(songs))
+            )
 
         def on_error(message: str) -> None:
-            self.statusBar().showMessage(f"加载每日推荐失败:{message}")
+            self.statusBar().showMessage(tr("list.daily_failed", message=message))
 
         run_async(fetch, on_done=on_done, on_error=on_error)
 
@@ -1012,7 +1051,7 @@ class MainWindow(QMainWindow):
             fetch,
             on_done=self._on_bili_folders_loaded,
             on_error=lambda message: self.statusBar().showMessage(
-                f"获取B站收藏夹失败:{message}"
+                tr("list.bili_folders_failed", message=message)
             ),
         )
 
@@ -1026,7 +1065,9 @@ class MainWindow(QMainWindow):
             folders, SETTING_BILI_FOLDER_ORDER, lambda f: f.media_id
         )
         self._rebuild_sidebar()
-        self.statusBar().showMessage(f"B站收藏夹 · 共 {len(folders)} 个")
+        self.statusBar().showMessage(
+            tr("list.bili_folders_loaded", count=len(folders))
+        )
 
     def _show_bili_items(self, items: list, list_ref: _ListRef) -> None:
         """B站条目列表(收藏夹/稍后再看共用)填表;只浏览不换队列。"""
@@ -1039,18 +1080,18 @@ class MainWindow(QMainWindow):
                 )
                 for item in playable
             ],
-            _HEADER_BILI,
+            "bili",
             list_ref,
         )
         skipped = len(items) - len(playable)
-        suffix = f"(跳过 {skipped} 条不可播内容)" if skipped else ""
+        suffix = tr("list.bili_skipped", count=skipped) if skipped else ""
         self.statusBar().showMessage(
-            f"{list_ref.title} · 共 {len(playable)} 首{suffix}"
+            tr("list.loaded", title=list_ref.title, count=len(playable)) + suffix
         )
 
     def _load_bili_folder_tracks(self, list_ref: _ListRef) -> None:
         self._clear_table()
-        self.statusBar().showMessage(f"正在加载:{list_ref.title}")
+        self.statusBar().showMessage(tr("list.loading", title=list_ref.title))
 
         def fetch() -> object:
             return self._bili_client.get_all_fav_folder_items(list_ref.id)
@@ -1061,13 +1102,13 @@ class MainWindow(QMainWindow):
             self._show_bili_items(items, list_ref)
 
         def on_error(message: str) -> None:
-            self.statusBar().showMessage(f"加载收藏夹失败:{message}")
+            self.statusBar().showMessage(tr("list.folder_failed", message=message))
 
         run_async(fetch, on_done=on_done, on_error=on_error)
 
     def _load_bili_watch_later(self, list_ref: _ListRef) -> None:
         self._clear_table()
-        self.statusBar().showMessage(f"正在加载:{list_ref.title}")
+        self.statusBar().showMessage(tr("list.loading", title=list_ref.title))
 
         def fetch() -> object:
             return self._bili_client.get_watch_later_items()
@@ -1081,7 +1122,7 @@ class MainWindow(QMainWindow):
             self._rebuild_sidebar()
 
         def on_error(message: str) -> None:
-            self.statusBar().showMessage(f"加载稍后再看失败:{message}")
+            self.statusBar().showMessage(tr("list.watchlater_failed", message=message))
 
         run_async(fetch, on_done=on_done, on_error=on_error)
 
@@ -1134,7 +1175,7 @@ class MainWindow(QMainWindow):
         self.sidebar.blockSignals(True)
         self.sidebar.clear()
         # 「搜索」入口:固定最顶(「最近」之上),图标复用移动端放大镜
-        search_item = QTreeWidgetItem(["搜索"])
+        search_item = QTreeWidgetItem([tr("sidebar.search")])
         search_item.setFlags(
             Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
         )
@@ -1144,18 +1185,28 @@ class MainWindow(QMainWindow):
         # 「最近」分区:跨平台聚合最近播放过的列表,非空才出现
         # (空分区只有占位噪音,首次起播后自然浮现)
         if self._recent:
-            recent_header = self._add_header_item("最近", None, "recent-header")
+            recent_header = self._add_header_item(
+                tr("sidebar.recent"), None, "recent-header"
+            )
             for ref in self._recent:
+                title = ref.title
+                if ref.kind == "search":
+                    # 搜索条目:存储标题用规范前缀,展示前缀随界面语言
+                    keyword = ref.title.removeprefix(_SEARCH_TITLE_PREFIX)
+                    title = f"{tr('search.recent_prefix')}{keyword}"
                 self._add_child_item(
-                    recent_header, sanitize_ui_text(ref.title), "recent-item",
+                    recent_header, sanitize_ui_text(title), "recent-item",
                     (ref.kind, ref.id, ref.title),
                 )
 
         netease_header = self._add_header_item(
-            "网易云 · 歌单", self._brand_header_icon("netease"), "netease-header"
+            tr("sidebar.netease_playlists"),
+            self._brand_header_icon("netease"), "netease-header",
         )
         if self._account is None:
-            self._add_child_item(netease_header, "扫码登录", "netease-login", None)
+            self._add_child_item(
+                netease_header, tr("sidebar.netease_login"), "netease-login", None
+            )
         else:
             for playlist in self._playlists:
                 title = sanitize_ui_text(playlist.name)
@@ -1166,19 +1217,19 @@ class MainWindow(QMainWindow):
                 )
             if not self._playlists:
                 self._add_child_item(
-                    netease_header, "歌单加载中…", "netease-loading", None,
-                    selectable=False,
+                    netease_header, tr("sidebar.loading_playlists"),
+                    "netease-loading", None, selectable=False,
                 )
 
         # 收藏的他人歌单:仅网易云已登录时展示(未登录整个分区不出现)
         if self._account is not None:
             subscribed_header = self._add_header_item(
-                "网易云 · 收藏", self._brand_header_icon("netease"),
-                "netease-subscribed-header",
+                tr("sidebar.netease_subscribed"),
+                self._brand_header_icon("netease"), "netease-subscribed-header",
             )
             # 每日推荐:固定首位(与 B站稍后再看同策略,不参与拖拽排序)
             self._add_child_item(
-                subscribed_header, _DAILY_REF.title, "netease-daily", None
+                subscribed_header, _daily_ref().title, "netease-daily", None
             )
             for playlist in self._subscribed_playlists:
                 title = sanitize_ui_text(playlist.name)
@@ -1189,18 +1240,21 @@ class MainWindow(QMainWindow):
                 )
             if not self._subscribed_playlists:
                 self._add_child_item(
-                    subscribed_header, "收藏加载中…", "netease-subscribed-loading",
-                    None, selectable=False,
+                    subscribed_header, tr("sidebar.loading_subscribed"),
+                    "netease-subscribed-loading", None, selectable=False,
                 )
 
         bili_header = self._add_header_item(
-            "B站 · 收藏夹", self._brand_header_icon("bilibili"), "bili-header"
+            tr("sidebar.bili_folders"),
+            self._brand_header_icon("bilibili"), "bili-header",
         )
         if self._bili_account is None:
-            self._add_child_item(bili_header, "未登录,点击登录", "bili-login", None)
+            self._add_child_item(
+                bili_header, tr("sidebar.bili_login"), "bili-login", None
+            )
         else:
             # 稍后再看:固定首位,kind 不在可排序集合里(不参与拖拽排序)
-            watchlater_title = "稍后再看"
+            watchlater_title = tr("sidebar.watchlater")
             if self._bili_watchlater_count is not None:
                 watchlater_title += f"({self._bili_watchlater_count})"
             self._add_child_item(
@@ -1213,11 +1267,11 @@ class MainWindow(QMainWindow):
                 self._add_child_item(bili_header, title, "bili-folder", folder.media_id)
             if not self._bili_folders:
                 self._add_child_item(
-                    bili_header, "收藏夹加载中…", "bili-loading", None,
-                    selectable=False,
+                    bili_header, tr("sidebar.loading_folders"),
+                    "bili-loading", None, selectable=False,
                 )
 
-        settings_item = QTreeWidgetItem(["设置"])
+        settings_item = QTreeWidgetItem([tr("sidebar.settings")])
         settings_item.setFlags(
             Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
         )
@@ -1298,7 +1352,7 @@ class MainWindow(QMainWindow):
                 if folder.media_id == entry_id:
                     return _ListRef(kind, entry_id, folder.title)
         elif kind == "bili-watchlater":
-            return _ListRef("bili-watchlater", 0, "稍后再看")
+            return _ListRef("bili-watchlater", 0, tr("sidebar.watchlater"))
         return _ListRef(kind, entry_id, item.text(0))
 
     def _open_list_ref(self, list_ref: _ListRef) -> None:
@@ -1341,7 +1395,7 @@ class MainWindow(QMainWindow):
             self._open_list_ref(self._sidebar_list_ref(kind, payload, item))
             return
         if kind == "netease-daily":
-            self._open_list_ref(_DAILY_REF)
+            self._open_list_ref(_daily_ref())
             return
         if kind == "bili-folder":
             self._open_list_ref(self._sidebar_list_ref(kind, payload, item))
@@ -1511,9 +1565,9 @@ class MainWindow(QMainWindow):
         self.table_stack.setCurrentIndex(1 if empty else 0)
         if empty:
             if self._account is None and self._bili_account is None:
-                self._empty_state.set_hint("登录网易云或B站后,这里会展示你的歌单与收藏夹")
+                self._empty_state.set_hint(tr("empty.not_logged_in"))
             else:
-                self._empty_state.set_hint("从左侧选择歌单或收藏夹,双击即可播放")
+                self._empty_state.set_hint(tr("empty.pick_from_sidebar"))
 
     def _clear_table(self) -> None:
         """清空表格与浏览上下文(切列表/登出时的加载中状态)。"""
@@ -1524,17 +1578,26 @@ class MainWindow(QMainWindow):
         self._update_table_empty_state()
 
     def _set_table_songs(
-        self, songs: list[QueueSong], header: list[str], context: _ListRef | None
+        self, songs: list[QueueSong], header_source: str, context: _ListRef | None
     ) -> None:
-        """把一个列表的歌曲填进表格(仅浏览;装入播放队列走双击)。"""
-        self._table_header = header
+        """把一个列表的歌曲填进表格(仅浏览;装入播放队列走双击)。
+
+        header_source 为 "netease" | "bili"(表头文案随语言现算,语言切换
+        时按它重取)。
+        """
+        self._table_header_source = header_source
         self._table_songs = songs
         self._table_context = context
         self._fill_song_table()
 
     def _fill_song_table(self) -> None:
         songs = self._table_songs
-        self.song_table.setHorizontalHeaderLabels(self._table_header)
+        header = (
+            _header_bili()
+            if self._table_header_source == "bili"
+            else _header_netease()
+        )
+        self.song_table.setHorizontalHeaderLabels(header)
         self.song_table.setRowCount(len(songs))
         for row, song in enumerate(songs):
             number = QTableWidgetItem(str(row + 1))
@@ -1598,7 +1661,7 @@ class MainWindow(QMainWindow):
         if keyword:
             self._run_search(keyword, reset=True)
         elif not self._table_songs:
-            self._empty_state.set_hint("输入关键词,回车搜索")
+            self._empty_state.set_hint(tr("search.empty_hint"))
         self._search_input.setFocus()
         self._search_input.selectAll()
 
@@ -1612,7 +1675,7 @@ class MainWindow(QMainWindow):
     def _on_search_return_pressed(self) -> None:
         keyword = self._search_input.text().strip()
         if not keyword:
-            self.statusBar().showMessage("请输入搜索关键词")
+            self.statusBar().showMessage(tr("search.keyword_empty"))
             return
         self._run_search(keyword, reset=True)
 
@@ -1659,9 +1722,9 @@ class MainWindow(QMainWindow):
         source = self._search_source
         if reset:
             self._clear_table()
-            self._empty_state.set_hint("正在搜索…")
+            self._empty_state.set_hint(tr("search.searching_hint"))
         self._search_more_btn.setVisible(False)
-        self.statusBar().showMessage(f"正在搜索:{keyword}")
+        self.statusBar().showMessage(tr("search.searching", keyword=keyword))
         if source == "bili":
             def fetch() -> object:
                 return self._bili_client.search_videos(keyword, page)
@@ -1678,7 +1741,7 @@ class MainWindow(QMainWindow):
                         )
                         for item in items if item.playable
                     ],
-                    _HEADER_BILI,
+                    "bili",
                     has_more,
                 )
         else:
@@ -1695,33 +1758,36 @@ class MainWindow(QMainWindow):
                 songs, total = result
                 self._apply_search_page(
                     [_netease_song_to_queue(song) for song in songs],
-                    _HEADER_NETEASE,
+                    "netease",
                     page * _SEARCH_PAGE_SIZE < total,
                 )
 
         def on_error(message) -> None:
             if generation != self._search_generation:
                 return
-            self.statusBar().showMessage(f"搜索失败:{message}")
+            self.statusBar().showMessage(tr("search.failed", message=message))
             if not self._table_songs:
-                self._empty_state.set_hint("搜索失败,换个关键词试试")
+                self._empty_state.set_hint(tr("search.failed_hint"))
 
         run_async(fetch, on_done, on_error)
 
     def _apply_search_page(
-        self, songs: list[QueueSong], header: list[str], has_more: bool
+        self, songs: list[QueueSong], header_source: str, has_more: bool
     ) -> None:
         """一页搜索结果落表(续拉时与已加载结果合并整表重填,缩略图走缓存)。"""
         merged = self._table_songs + songs if self._search_page > 1 else songs
         self._set_table_songs(
             merged,
-            header,
+            header_source,
             _ListRef("search", 0, f"{_SEARCH_TITLE_PREFIX}{self._search_keyword}"),
         )
         self._search_has_more = has_more
         self._search_more_btn.setVisible(has_more)
         self.statusBar().showMessage(
-            f"搜索「{self._search_keyword}」· 已加载 {len(merged)} 首"
+            tr(
+                "search.result_loaded",
+                keyword=self._search_keyword, count=len(merged),
+            )
         )
 
     # -- 播放 ----------------------------------------------------------------
@@ -1749,7 +1815,7 @@ class MainWindow(QMainWindow):
         if not (0 <= row < len(self._table_songs)):
             return
         menu = QMenu(self.song_table)
-        play_next_action = menu.addAction("下一首播放")
+        play_next_action = menu.addAction(tr("play.play_next_menu"))
         chosen = menu.exec(self.song_table.viewport().mapToGlobal(pos))
         if chosen is play_next_action:
             self._insert_next_from_table(row)
@@ -1761,7 +1827,7 @@ class MainWindow(QMainWindow):
         self._queue_dirty = True
         # queue_changed 订阅方会作废下一首预取(peek 目标已变成插播曲)
         self.statusBar().showMessage(
-            f"下一首播放:{song.title}(队列第 {position + 1} 位)"
+            tr("play.play_next_done", title=song.title, position=position + 1)
         )
 
     def _play_at(self, index: int) -> None:
@@ -1773,12 +1839,15 @@ class MainWindow(QMainWindow):
         if song is None:
             return
         if self.engine is None:
-            self.statusBar().showMessage(self._engine_error or "播放内核不可用")
+            self.statusBar().showMessage(
+                self._engine_error or tr("play.engine_unavailable")
+            )
             return
         generation = self._resolve_generation
         self._queue.jump(index)
         self.player_bar.set_track(song.title, song.artist)
         self.player_bar.set_cover(song.cover_url)
+        self._request_dynamic_seed(song)
 
         prefetched = self._take_prefetched(index, song)
         if prefetched is not None:
@@ -1793,7 +1862,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self.statusBar().showMessage(f"正在解析播放地址:{song.title}")
+        self.statusBar().showMessage(tr("play.resolving", title=song.title))
         self._resolve_and_start(song, generation)
 
     def _resolve_song_context(self, song: QueueSong) -> _SongContext:
@@ -1818,16 +1887,23 @@ class MainWindow(QMainWindow):
             return _SongContext(
                 rotator=BackupUrlRotator(stream.candidate_urls),
                 headers=build_bili_stream_headers(),
-                status=f"正在播放:{song.title}{_bili_quality_suffix(stream)}",
+                status=tr(
+                    "play.playing",
+                    title=song.title, quality=_bili_quality_suffix(stream),
+                ),
             )
         playable = self._client.resolve_playable_url(
             song.id, song.duration_ms, preferred_quality=quality
         )
         # 试听片段提示保持原样不追加音质;完整播放展示实际生效档位
         status = (
-            "当前为试听片段(完整播放需开通 VIP)"
+            tr("play.preview")
             if playable.is_preview
-            else f"正在播放:{song.title}{_netease_quality_suffix(playable.level)}"
+            else tr(
+                "play.playing",
+                title=song.title,
+                quality=_netease_quality_suffix(playable.level),
+            )
         )
         # 网易云不参与 backupUrls 轮换:音质回退链已在解析层完成
         return _SongContext(
@@ -1867,7 +1943,7 @@ class MainWindow(QMainWindow):
                 return  # 过期请求:已被更新的点歌覆盖,结果作废
             kind, payload = result
             if kind == "auth":
-                self._handle_stale_login("登录态已失效,请重新登录")
+                self._handle_stale_login(tr("login.status.stale"))
                 return
             if kind == "error":
                 self._handle_play_failure(song, payload)
@@ -1882,9 +1958,7 @@ class MainWindow(QMainWindow):
                 return  # 过期请求:已被更新的点歌覆盖,结果作废
             kind, payload = result
             if kind == "auth":
-                self._handle_bili_stale_login(
-                    "B站登录态已失效,请点击侧栏「B站 · 收藏夹」重新登录"
-                )
+                self._handle_bili_stale_login(tr("bili.auth_expired_sidebar"))
                 return
             if kind == "error":
                 self._handle_play_failure(song, payload)
@@ -1904,14 +1978,16 @@ class MainWindow(QMainWindow):
         url = rotator.current
         if not url:
             # 解析成功但没有任何可用地址:同样是播放失败,走统一出口
-            self._handle_play_failure(song, "无可用播放地址")
+            self._handle_play_failure(song, tr("play.no_url"))
             return
         self._active = _ActivePlay(
             song=song, rotator=rotator, headers=headers, from_prefetch=from_prefetch
         )
         self._play_fail_count = 0  # 成功发起播放:连续失败计数复位
         self.player_bar.set_active(True)
-        self.statusBar().showMessage(status or f"正在播放:{song.title}")
+        self.statusBar().showMessage(
+            status or tr("play.playing", title=song.title, quality="")
+        )
         self.engine.play_url(url, headers)
         self._push_recent()  # 成功起播才算「听过」(仅浏览不压栈)
         self._schedule_prefetch_next()  # 起播成功:顺手后台预取下一首
@@ -1943,6 +2019,59 @@ class MainWindow(QMainWindow):
         ]
         self._store.save_settings(self._settings)
         self._rebuild_sidebar()
+
+    # -- 动态取色(M5) --------------------------------------------------------
+
+    def _request_dynamic_seed(self, song: QueueSong) -> None:
+        """点歌时请求封面种子色:缓存命中直接套用,否则交 seed loader。
+
+        无封面的歌回退静态冻结色板(对齐 Android:activeCoverSeedHex
+        为空即用默认种子)。代际自增作废在途回调(快速切歌不打架)。
+        """
+        self._seed_generation += 1
+        url = song.cover_url or ""
+        self._seed_url = url
+        if not url:
+            self._revert_static_theme()
+            return
+        cached = cover_seed.cache_get(url)
+        if cached is not None:
+            self._apply_dynamic_seed(cached)
+            return
+        self._seed_loader.request(url)
+
+    def _on_seed_cover_ready(self, url: str, data: bytes) -> None:
+        """封面字节到手:后台线程提取种子(QImage 解码+直方图),回 UI 应用。"""
+        if url != self._seed_url:
+            return  # 已切歌,过期结果丢弃
+        generation = self._seed_generation
+
+        def extract() -> object:
+            return cover_seed.extract_seed_hex(data)
+
+        def on_done(hex_color) -> None:
+            if generation != self._seed_generation or url != self._seed_url:
+                return
+            if not isinstance(hex_color, str):
+                return  # 坏图:维持现状
+            cover_seed.cache_put(url, hex_color)
+            self._apply_dynamic_seed(hex_color)
+
+        run_async(extract, on_done=on_done)
+
+    def _apply_dynamic_seed(self, hex_color: str) -> None:
+        """把种子色套成动态主题(开关关闭时只记住不应用)。"""
+        seed = seed_from_hex(hex_color)
+        if seed == self._dynamic_seed:
+            return
+        self._dynamic_seed = seed
+        if self._settings.get(SETTING_DYNAMIC_COLOR, True):
+            self.themes.apply_dynamic(seed)
+
+    def _revert_static_theme(self) -> None:
+        """回退静态冻结色板(歌无封面 / 关闭开关)。"""
+        self._dynamic_seed = None
+        self.themes.apply(self.themes.name)
 
     def _schedule_prefetch_next(self) -> None:
         """预取下一首的播放地址(run_async 后台,UI 线程零网络铁律)。
@@ -2010,13 +2139,17 @@ class MainWindow(QMainWindow):
         active = self._active
         if active is None:
             # 无进行中的播放上下文:没有候选可轮换、没有歌曲可跳,维持仅提示
-            self.statusBar().showMessage(f"播放失败:{message}")
+            self.statusBar().showMessage(tr("play.failed", message=message))
             return
         if active.rotator.has_next():
             next_url = active.rotator.advance()
             self.statusBar().showMessage(
-                f"播放失败,切换备用线路重试"
-                f"({active.rotator.position}/{len(active.rotator)}):{active.song.title}"
+                tr(
+                    "play.failed_retry",
+                    position=active.rotator.position,
+                    total=len(active.rotator),
+                    title=active.song.title,
+                )
             )
             self.engine.play_url(next_url, active.headers)
             return
@@ -2027,7 +2160,7 @@ class MainWindow(QMainWindow):
             # 起播流程;再失败才按既有失败路径走。
             active.from_prefetch = False
             self.statusBar().showMessage(
-                f"预取地址已过期,正在重新解析:{active.song.title}"
+                tr("play.prefetch_expired", title=active.song.title)
             )
             self._resolve_and_start(active.song, self._resolve_generation)
             return
@@ -2041,23 +2174,28 @@ class MainWindow(QMainWindow):
         - 连续失败达 _MAX_PLAY_FAILS 即熔断:只提示、不再自动接播。
         - 登录失效(kind=="auth")不经此处,仍走原有重登流程,绝不跳歌。
         """
-        self.statusBar().showMessage(f"播放失败:{song.title}:{message}")
+        self.statusBar().showMessage(
+            tr("play.failed_song", title=song.title, message=message)
+        )
         if self._tray is not None:
-            self._tray.show_message("播放失败", f"{song.title}\n{message}")
+            self._tray.show_message(
+                tr("play.failed_title"), f"{song.title}\n{message}"
+            )
         self._play_fail_count += 1
         if self._play_fail_count >= _MAX_PLAY_FAILS:
             self.statusBar().showMessage(
-                f"连续 {_MAX_PLAY_FAILS} 次播放失败,已暂停自动跳过,请检查网络或手动切歌"
+                tr("play.circuit_breaker", count=_MAX_PLAY_FAILS)
             )
             if self._tray is not None:
                 self._tray.show_message(
-                    "连续播放失败",
-                    f"连续 {_MAX_PLAY_FAILS} 次播放失败,已暂停自动跳过,\n"
-                    "请检查网络或手动切歌",
+                    tr("play.circuit_breaker_title"),
+                    tr("play.circuit_breaker_tray", count=_MAX_PLAY_FAILS),
                 )
             return
         self.statusBar().showMessage(
-            f"播放失败:{song.title}({message}),即将自动跳到下一首…"
+            tr(
+                "play.failed_auto_skip", title=song.title, message=message,
+            )
         )
         # 自增 token:作废可能仍在等待的旧自动跳过;期间用户手动点歌同样作废
         self._fail_skip_token += 1
@@ -2078,7 +2216,7 @@ class MainWindow(QMainWindow):
         """
         index = self._queue.advance_after_failure()
         if index is None:
-            self.statusBar().showMessage("播放失败:队列已到尾,停止播放")
+            self.statusBar().showMessage(tr("play.failed_end"))
             return
         self._play_at(index)
 
@@ -2100,13 +2238,15 @@ class MainWindow(QMainWindow):
         if self._queue.mode() is PlayMode.REPEAT_ONE and self._active is not None:
             url = self._active.rotator.current
             if url:
-                self.statusBar().showMessage(f"单曲循环:{self._active.song.title}")
+                self.statusBar().showMessage(
+                    tr("play.repeat_one", title=self._active.song.title)
+                )
                 self.engine.play_url(url, self._active.headers)
                 return
         index = self._queue.advance_ended()
         if index is None:
             self.player_bar.set_playing(False)
-            self.statusBar().showMessage("播放完毕")
+            self.statusBar().showMessage(tr("play.finished"))
             return
         self._play_at(index)
 
@@ -2126,7 +2266,7 @@ class MainWindow(QMainWindow):
         self._settings["play_mode"] = mode.value
         self._store.save_settings(self._settings)
         self.settings_page.set_play_mode(mode.value)
-        self.statusBar().showMessage(f"播放模式:{mode.display_name}")
+        self.statusBar().showMessage(tr("play.mode", name=mode.display_name))
 
     def _on_queue_mode_changed(self, mode) -> None:
         self.player_bar.set_mode(mode.value, mode.display_name)
@@ -2161,18 +2301,70 @@ class MainWindow(QMainWindow):
         self._rebuild_sidebar()
 
     def _on_settings_appearance(self, value: str) -> None:
-        """设置页外观选择:持久化并即时切换主题。"""
+        """设置页外观选择:持久化并即时切换主题(动态取色在新明暗下重算)。"""
         if value not in theme.VALID_THEMES:
             return
         self._settings[SETTING_APPEARANCE] = value
         self._store.save_settings(self._settings)
         self.themes.apply(value)
+        if (
+            self._dynamic_seed is not None
+            and self._settings.get(SETTING_DYNAMIC_COLOR, True)
+        ):
+            self.themes.apply_dynamic(self._dynamic_seed)
+
+    def _on_settings_dynamic_color(self, enabled: bool) -> None:
+        """设置页动态取色开关:持久化;开启即恢复记住的种子,关闭回静态。
+
+        关闭期间点歌仍会记住(不应用)种子,故重开可直接恢复,无需
+        等下一次点歌;无种子(还没播过歌)时维持静态。
+        """
+        self._settings[SETTING_DYNAMIC_COLOR] = enabled
+        self._store.save_settings(self._settings)
+        if enabled:
+            if self._dynamic_seed is not None:
+                self.themes.apply_dynamic(self._dynamic_seed)
+        else:
+            self._revert_static_theme()
+
+    def _on_settings_language(self, value: str) -> None:
+        """设置页语言滑块:持久化并切换当前语言(经 i18n 通知重翻译)。"""
+        if value not in i18n.VALID_LANGUAGES:
+            return
+        self._settings[SETTING_LANGUAGE] = value
+        self._store.save_settings(self._settings)
+        i18n.set_language(value)
+
+    def _on_language_changed(self, language: str) -> None:
+        """语言切换的全量文案刷新(与主题切换的 theme_changed 同套路)。
+
+        静态文案逐一重设;动态文案(状态栏消息)本就现算现显,无需处理。
+        侧栏整树重建(条目文字都在树里);表格只重设表头(单元格内容是
+        歌曲数据,不随语言变)。
+        """
+        self._fill_song_table()
+        self._search_input.setPlaceholderText(tr("search.placeholder"))
+        self._search_netease_btn.setText(tr("search.source_netease"))
+        self._search_bili_btn.setText(tr("search.source_bili"))
+        self._search_more_btn.setText(tr("search.more"))
+        self._rebuild_sidebar()
+        self._update_table_empty_state()
+        self._update_source_indicator(animate=False)  # 文字变宽,指示线重新对位
+        self.player_bar.retranslate()
+        self.settings_page.retranslate()
+        self.login_page.retranslate()
+        if self._queue_window is not None:
+            self._queue_window.retranslate()
+        if self._tray is not None:
+            self._tray.retranslate()
+        self.statusBar().showMessage(tr("common.ready"))
 
     def _on_theme_changed(self, name: str) -> None:
         """主题切换的全量资源刷新(ThemeManager 已换全局 QSS)。"""
         self.player_bar.retheme()
         self._empty_state.retheme()
         self.settings_page.retheme_link()
+        self.settings_page.language_switch.update()  # 自绘滑块按新色板重画
         self._apply_sidebar_icons()
         if self._tray is not None:
             self._tray.set_icon(tray_icon(name))
@@ -2184,12 +2376,20 @@ class MainWindow(QMainWindow):
         page.appearance_changed.connect(self._on_settings_appearance)
         page.quality_changed.connect(self._on_settings_play_quality)
         page.recent_max_changed.connect(self._on_settings_recent_max)
+        page.language_changed.connect(self._on_settings_language)
+        page.dynamic_color_changed.connect(self._on_settings_dynamic_color)
         page.set_close_action(self._settings.get("close_action", "tray"))
         page.set_play_mode(self._settings.get("play_mode", "sequence"))
         page.set_appearance(self._settings.get(SETTING_APPEARANCE, "dark"))
         page.set_quality(self._settings.get(SETTING_PLAY_QUALITY, "lossless"))
         page.set_recent_max(
             self._settings.get(SETTING_RECENT_MAX, DEFAULT_RECENT_MAX)
+        )
+        page.set_language(
+            self._settings.get(SETTING_LANGUAGE, i18n.DEFAULT_LANGUAGE)
+        )
+        page.set_dynamic_color(
+            self._settings.get(SETTING_DYNAMIC_COLOR, True)
         )
 
     # -- 队列窗口 --------------------------------------------------------------
@@ -2217,7 +2417,9 @@ class MainWindow(QMainWindow):
         self.engine.track_ended.connect(self._on_track_ended)
         self.engine.load_failed.connect(self._on_load_failed)
         self.engine.error.connect(
-            lambda message: self.statusBar().showMessage(f"播放错误:{message}")
+            lambda message: self.statusBar().showMessage(
+                tr("play.error", message=message)
+            )
         )
 
     def _wire_player_bar(self) -> None:
@@ -2279,7 +2481,7 @@ class MainWindow(QMainWindow):
         if self.engine is not None:
             self.engine.stop()
         self.player_bar.set_playing(False)
-        self.statusBar().showMessage("已停止")
+        self.statusBar().showMessage(tr("common.stopped"))
 
     def _show_main_window(self) -> None:
         self.show()
@@ -2309,11 +2511,12 @@ class MainWindow(QMainWindow):
             if not self._tray_hint_shown:
                 self._tray.show_message(
                     "NeriPlayer Win",
-                    "已最小化到托盘:双击托盘图标恢复窗口,右键菜单可退出。",
+                    tr("tray.minimized_body"),
                 )
                 self._tray_hint_shown = True
             return
         self.login_page.stop()
+        i18n.remove_listener(self._on_language_changed)
         if self._queue_window is not None:
             self._queue_window.close()
         if self._media_keys is not None:

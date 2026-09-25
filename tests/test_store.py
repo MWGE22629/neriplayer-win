@@ -200,6 +200,8 @@ class TestLocalStoreSettings:
             "bili_folder_order": [],
             "recent_max": 8,
             "recent_lists": [],
+            "language": "zh",
+            "dynamic_color": True,
         }
 
 

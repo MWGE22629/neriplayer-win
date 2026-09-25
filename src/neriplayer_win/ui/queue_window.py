@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QLabel, QListWidget, QListWidgetItem, QVBoxLayout, QWidget
 
+from ..i18n import tr
 from ..player.queue import PlayQueue
 
 
@@ -20,7 +21,7 @@ class QueueWindow(QWidget):
 
     def __init__(self, queue: PlayQueue, parent: QWidget | None = None) -> None:
         super().__init__(parent, Qt.WindowType.Window)
-        self.setWindowTitle("播放队列")
+        self.setWindowTitle(tr("queue.title"))
         self.resize(440, 540)
         self._queue = queue
         self._current_row = -1
@@ -41,6 +42,11 @@ class QueueWindow(QWidget):
         self.rebuild()
 
     # -- 对外 ----------------------------------------------------------------
+
+    def retranslate(self) -> None:
+        """语言切换:窗口标题与表头(表头经 _update_header 重算)。"""
+        self.setWindowTitle(tr("queue.title"))
+        self._update_header()
 
     def rebuild(self) -> None:
         """按队列内容重建列表并恢复当前曲高亮。"""
@@ -104,7 +110,9 @@ class QueueWindow(QWidget):
 
     def _update_header(self, *_args) -> None:
         mode = self._queue.mode()
-        self.header_label.setText(f"共 {len(self._queue)} 首 · {mode.display_name}")
+        self.header_label.setText(
+            tr("queue.header", count=len(self._queue), mode=mode.display_name)
+        )
 
     def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
         row = item.data(Qt.ItemDataRole.UserRole)

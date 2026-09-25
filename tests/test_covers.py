@@ -20,7 +20,7 @@ from PySide6.QtGui import QColor, QImage
 from neriplayer_win.player.queue import QueueSong
 from neriplayer_win.ui import covers as covers_module
 from neriplayer_win.ui.covers import CoverLoader
-from neriplayer_win.ui.main_window import _HEADER_BILI, _HEADER_NETEASE, MainWindow
+from neriplayer_win.ui.main_window import MainWindow
 
 
 def _png_bytes(color: str = "#ff0000") -> bytes:
@@ -241,7 +241,7 @@ class TestTableCoverWiring:
                 _song(2, "http://img/a"),
                 _song(3, "http://img/b"),
             ]
-            window._set_table_songs(songs, _HEADER_NETEASE, None)
+            window._set_table_songs(songs, "netease", None)
             # 按行序整表交给预取池(去重在池内做)
             assert requested == [
                 ["http://img/a", "http://img/a", "http://img/b"]
@@ -263,7 +263,7 @@ class TestTableCoverWiring:
                 _song(2, "http://img/a"),
                 _song(3, "http://img/b"),
             ]
-            window._set_table_songs(songs, _HEADER_NETEASE, None)
+            window._set_table_songs(songs, "netease", None)
             window._on_table_cover_ready("http://img/a", _png_bytes("#00ff00"))
             assert not window.song_table.item(0, 1).icon().isNull()
             assert not window.song_table.item(1, 1).icon().isNull()  # 同 URL 多行
@@ -280,8 +280,8 @@ class TestTableCoverWiring:
         window = _make_window(qapp, monkeypatch, tmp_path)
         try:
             _silence_preload(monkeypatch, window)
-            window._set_table_songs([_song(1, "http://img/a")], _HEADER_NETEASE, None)
-            window._set_table_songs([_song(9, "http://img/z")], _HEADER_BILI, None)
+            window._set_table_songs([_song(1, "http://img/a")], "netease", None)
+            window._set_table_songs([_song(9, "http://img/z")], "bili", None)
             # 旧表迟到的回调:当前表没有该 URL,直接丢弃
             window._on_table_cover_ready("http://img/a", _png_bytes())
             assert window.song_table.item(0, 1).icon().isNull()
@@ -294,7 +294,7 @@ class TestTableCoverWiring:
         window = _make_window(qapp, monkeypatch, tmp_path)
         try:
             _silence_preload(monkeypatch, window)
-            window._set_table_songs([_song(1, "http://img/a")], _HEADER_NETEASE, None)
+            window._set_table_songs([_song(1, "http://img/a")], "netease", None)
             window._on_table_cover_ready("http://img/a", _png_bytes("#0000ff"))
             icon = window._cover_icons["http://img/a"]
             dpr = window.song_table.devicePixelRatioF()

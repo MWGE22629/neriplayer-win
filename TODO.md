@@ -120,7 +120,39 @@ Windows 桌面音乐播放器,自用优先:网易云 + B站两个音源,
       (ConnectError/ConnectTimeout,典型为代理残留的 WinError 10061)
       且存在代理配置时,直连重试一次;无代理配置不重试,重试失败抛
       原始异常(保留用户配置路径的报错语义);降级与降级失败均落日志
-      (2026-09-23 实现:回归测试 6 例;随 v0.6.3 发布)
+      (2026-09-23 实现;回归测试 6 例;随 v0.6.3 发布)
+- [x] 界面中英双语:文案表收敛到 neriplayer_win/i18n.py(tr 键取,
+      缺键兜底返回键名);设置页新增「语言 · Language」分组,内嵌
+      自绘左右滑动滑块(中文|English,点选半区即切换,200ms 动画);
+      默认中文,settings.json 增 language 键持久化(非法值回落 zh);
+      切换即时全量重翻译(侧栏重建/表头/搜索页/播放条/托盘菜单/
+      队列窗口/登录页,状态栏消息本就现算);「最近」栈里搜索条目的
+      持久化标题保持规范前缀「搜索:」不随语言变(老数据回放不受
+      影响),仅展示前缀随语言;设置页内容包 QScrollArea(分组增多后
+      页面 minHint 不再顶高主窗口,默认窗高保持 680);更多语言
+      (0.7 计划)只需在 i18n.py 扩充 VALID_LANGUAGES 与文案表
+      (2026-09-25 实现;回归测试 26 例覆盖文案表/持久化/滑块交互/
+      全量重翻译/双语回放/窗口高度回归;离屏+windows 双平台渲染经视觉验收)
+
+- [x] 播放动态取色(对齐 Android):播放歌曲时从封面提取主色,整个
+      界面随之柔和变色;关播/无封面/关开关回默认冻结色板
+      (2026-09-25 实现,对照 reference/NeriPlayer-Android 调研:
+      CoverArtColorCache 用 androidx Palette 在 96px 缩略图上
+      vibrant→muted→dominant 择色,NeriTheme 用 materialkolor
+      rememberDynamicColorScheme(TonalSpot)从种子生成整套 M3
+      色板,dynamicColor 开关默认开、种子回落 #0061A4。
+      本项目落地:ui/material_color.py 为 Google
+      material-color-utilities(Apache-2.0,注明引用)HCT/CAM16/
+      TonalPalette/SchemeTonalSpot 的最小 Python 移植,与上游
+      Python 移植对拍 10 种子×亮暗×25 角色 500/500 一致,参考值
+      烘干进 tests/test_dynamic_theme.py;ui/cover_seed.py 同语义
+      近似 Palette 择色(5bit 量化直方图+HSL 打分,64 条 FIFO 缓存);
+      ThemeManager.apply_dynamic 按当前明暗现算色板全量重渲(明暗
+      模式名不变,托盘图标不受影响);设置页外观组新增「播放时跟随
+      封面取色」开关(默认开,settings.json 增 dynamic_color 键);
+      MainWindow 以独立 CoverLoader 取封面字节(磁盘缓存同源,零额外
+      网络),代际 token 防快速切歌串色;回归 24 例+离屏渲染视觉
+      验收(暖橙/紫粉/青绿三主题可读性通过)
 
 ## 明确暂缓(有需求再启动)
 

@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..i18n import tr
+from ..player.queue import PlayMode
 from . import theme
 from .covers import CoverLoader
 from .icons import tinted_icon, tinted_icon_with_color
@@ -151,6 +153,7 @@ class PlayerBar(QWidget):
         self._dragging = False
         self._mode_value = "sequence"
         self._playing = False
+        self._track_set = False  # set_track 后占位文案不再随语言重翻译覆盖
         self._cover_url = ""
 
         # 封面小图(40x40 圆角;加载中/缺失显示淡色音符占位)
@@ -161,7 +164,7 @@ class PlayerBar(QWidget):
         self.cover_loader.cover_ready.connect(self._on_cover_ready)
         self._show_cover_placeholder()
 
-        self.track_label = ElidedLabel("未在播放")
+        self.track_label = ElidedLabel(tr("player.not_playing"))
         self.track_label.setObjectName("trackLabel")
         self.artist_label = ElidedLabel("")
         self.artist_label.setObjectName("artistLabel")
@@ -180,21 +183,21 @@ class PlayerBar(QWidget):
         self.total_time_label = QLabel("00:00")
 
         self.mode_button = QPushButton()
-        self.mode_button.setToolTip("播放模式:顺序播放")
-        self.mode_button.setAccessibleName("播放模式")
+        self.mode_button.setToolTip(tr("player.mode_tooltip", name=PlayMode.SEQUENCE.display_name))
+        self.mode_button.setAccessibleName(tr("player.mode_accessible"))
         self.prev_button = QPushButton()
-        self.prev_button.setToolTip("上一首")
-        self.prev_button.setAccessibleName("上一首")
+        self.prev_button.setToolTip(tr("player.prev"))
+        self.prev_button.setAccessibleName(tr("player.prev_accessible"))
         self.play_button = QPushButton()
         self.play_button.setObjectName("playButton")
-        self.play_button.setToolTip("播放")
-        self.play_button.setAccessibleName("播放/暂停")
+        self.play_button.setToolTip(tr("player.play"))
+        self.play_button.setAccessibleName(tr("player.play_accessible"))
         self.next_button = QPushButton()
-        self.next_button.setToolTip("下一首")
-        self.next_button.setAccessibleName("下一首")
+        self.next_button.setToolTip(tr("player.next"))
+        self.next_button.setAccessibleName(tr("player.next_accessible"))
         self.queue_button = QPushButton()
-        self.queue_button.setToolTip("打开播放队列")
-        self.queue_button.setAccessibleName("播放队列")
+        self.queue_button.setToolTip(tr("player.queue"))
+        self.queue_button.setAccessibleName(tr("player.queue_accessible"))
         for button in (self.mode_button, self.prev_button, self.next_button,
                        self.queue_button):
             button.setIconSize(QSize(20, 20))
@@ -212,7 +215,7 @@ class PlayerBar(QWidget):
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(70)
         self.volume_slider.setFixedWidth(90)
-        self.volume_slider.setToolTip("音量")
+        self.volume_slider.setToolTip(tr("player.volume"))
 
         progress_row = QHBoxLayout()
         progress_row.setContentsMargins(0, 0, 0, 0)
@@ -259,6 +262,7 @@ class PlayerBar(QWidget):
     # -- 对外状态 ------------------------------------------------------------
 
     def set_track(self, title: str, artist: str = "") -> None:
+        self._track_set = True
         self.track_label.set_text_elided(title)
         self.artist_label.set_text_elided(artist)
 
@@ -288,12 +292,13 @@ class PlayerBar(QWidget):
         """更新播放模式按钮(由 MainWindow 在模式变化时调用)。
 
         mode_value 为 PlayMode 的枚举值;按钮显示对应图标,
-        display_name 进 tooltip 与 accessibleName。
+        display_name 进 tooltip 与 accessibleName(缺省按值现取,
+        覆盖语言切换后 display_name 未随行的问题)。
         """
         self._mode_value = mode_value
-        name = display_name or mode_value
-        self.mode_button.setToolTip(f"播放模式:{name}")
-        self.mode_button.setAccessibleName(f"播放模式:{name}")
+        name = display_name or PlayMode(mode_value).display_name
+        self.mode_button.setToolTip(tr("player.mode_tooltip", name=name))
+        self.mode_button.setAccessibleName(tr("player.mode_tooltip", name=name))
         self.mode_button.setIcon(tinted_icon(_MODE_ICON.get(mode_value, "playlist_play"), "primary"))
 
     def set_playing(self, playing: bool) -> None:
@@ -302,7 +307,7 @@ class PlayerBar(QWidget):
         self.play_button.setIcon(
             tinted_icon("pause" if playing else "play", "onPrimaryContainer")
         )
-        self.play_button.setToolTip("暂停" if playing else "播放")
+        self.play_button.setToolTip(tr("player.pause" if playing else "player.play"))
 
     def set_progress(self, position_s: float, duration_s: float) -> None:
         self.current_time_label.setText(format_seconds(position_s))
@@ -332,6 +337,21 @@ class PlayerBar(QWidget):
         self._apply_icons()
         if not self._cover_url:
             self._show_cover_placeholder()
+
+    def retranslate(self) -> None:
+        """语言切换后重设全部静态文案(歌曲标题等动态内容不动)。"""
+        self.prev_button.setToolTip(tr("player.prev"))
+        self.prev_button.setAccessibleName(tr("player.prev_accessible"))
+        self.play_button.setAccessibleName(tr("player.play_accessible"))
+        self.next_button.setToolTip(tr("player.next"))
+        self.next_button.setAccessibleName(tr("player.next_accessible"))
+        self.queue_button.setToolTip(tr("player.queue"))
+        self.queue_button.setAccessibleName(tr("player.queue_accessible"))
+        self.volume_slider.setToolTip(tr("player.volume"))
+        self.set_mode(self._mode_value)  # 现取当前模式的译名进 tooltip/accessibleName
+        self.set_playing(self._playing)  # 现取播放/暂停 tooltip
+        if not self._track_set:
+            self.track_label.set_text_elided(tr("player.not_playing"))
 
     # -- 图标 ----------------------------------------------------------------
 

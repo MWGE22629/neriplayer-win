@@ -553,6 +553,9 @@ def build_qss(theme: Mapping[str, str]) -> str:
 # ---------------------------------------------------------------------------
 
 _current_name: str = DEFAULT_THEME
+# 动态主题(M5):非 None 时为当前生效的封面取色色板(覆盖同名冻结色板)。
+# apply() 切换明暗/回静态时清除;apply_dynamic() 写入。
+_dynamic_palette: dict[str, str] | None = None
 # 已实际写入 QApplication 的主题;None = 进程还没写过——冷启动即使
 # 就是默认主题(名字未变)也必须写一次 QSS,不能按"未变化"跳过
 _applied_name: str | None = None
@@ -563,11 +566,19 @@ def current_theme_name() -> str:
 
 
 def current_palette() -> dict[str, str]:
+    if _dynamic_palette is not None:
+        return _dynamic_palette
     return PALETTES[_current_name]
 
 
 class ThemeManager(QObject):
-    """持当前主题;apply() 设全局 QSS 并广播,由各控件重取染色资源。"""
+    """持当前主题;apply() 设全局 QSS 并广播,由各控件重取染色资源。
+
+    apply_dynamic(seed) 为 M5 动态取色:按当前明暗模式从种子色现算
+    TonalSpot 色板并写入(见 ui/material_color.py,与 Android 端
+    materialkolor 同参数);明暗模式名不变(tray 图标等按名取资源),
+    current_palette() 返回动态覆盖值,直到 apply() 回静态。
+    """
 
     theme_changed = Signal(str)
 
@@ -580,10 +591,10 @@ class ThemeManager(QObject):
         return self._name
 
     def palette(self) -> dict[str, str]:
-        return PALETTES[self._name]
+        return current_palette()
 
     def qss(self) -> str:
-        return build_qss(PALETTES[self._name])
+        return build_qss(current_palette())
 
     def apply(self, name: str) -> None:
         """切换主题并即时重渲;主题未变且 QSS 已写过时跳过重设。
@@ -595,10 +606,11 @@ class ThemeManager(QObject):
         """
         if name not in VALID_THEMES:
             raise ValueError(f"未知主题:{name!r}(可选:{VALID_THEMES})")
-        global _current_name, _applied_name
-        changed = name != _current_name
+        global _current_name, _applied_name, _dynamic_palette
+        changed = name != _current_name or _dynamic_palette is not None
         self._name = name
         _current_name = name
+        _dynamic_palette = None  # 回静态冻结色板
         if not changed and _applied_name == name:
             return
         from PySide6.QtWidgets import QApplication
@@ -609,3 +621,21 @@ class ThemeManager(QObject):
             _applied_name = name
         if changed:
             self.theme_changed.emit(name)
+
+    def apply_dynamic(self, seed_argb: int) -> None:
+        """以种子色按当前明暗模式现算色板并应用(播放取色入口)。
+
+        即便种子与上次相同也不跳过:调用方自行去重;此处总是重写 QSS
+        并广播(一次切歌至多一次,成本可接受)。
+        """
+        from .material_color import tonal_spot_palette
+
+        global _dynamic_palette, _applied_name
+        _dynamic_palette = tonal_spot_palette(seed_argb, self._name == THEME_DARK)
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(self.qss())
+            _applied_name = self._name
+        self.theme_changed.emit(self._name)

@@ -24,6 +24,8 @@ from typing import Iterable
 
 from PySide6.QtCore import QObject, Signal
 
+from .. import i18n
+
 
 class PlayMode(str, Enum):
     """播放模式;值为 settings.json 里的持久化字符串。"""
@@ -34,22 +36,22 @@ class PlayMode(str, Enum):
 
     @property
     def display_name(self) -> str:
-        return _MODE_DISPLAY_NAME[self]
+        return i18n.tr(_MODE_DISPLAY_KEY[self])
 
     @property
     def button_label(self) -> str:
-        return _MODE_BUTTON_LABEL[self]
+        return i18n.tr(_MODE_BUTTON_KEY[self])
 
 
-_MODE_DISPLAY_NAME = {
-    PlayMode.SEQUENCE: "顺序播放",
-    PlayMode.SHUFFLE: "随机播放",
-    PlayMode.REPEAT_ONE: "单曲循环",
+_MODE_DISPLAY_KEY = {
+    PlayMode.SEQUENCE: "mode.sequence",
+    PlayMode.SHUFFLE: "mode.shuffle",
+    PlayMode.REPEAT_ONE: "mode.repeat_one",
 }
-_MODE_BUTTON_LABEL = {
-    PlayMode.SEQUENCE: "顺序",
-    PlayMode.SHUFFLE: "随机",
-    PlayMode.REPEAT_ONE: "单曲",
+_MODE_BUTTON_KEY = {
+    PlayMode.SEQUENCE: "mode.short.sequence",
+    PlayMode.SHUFFLE: "mode.short.shuffle",
+    PlayMode.REPEAT_ONE: "mode.short.repeat_one",
 }
 
 

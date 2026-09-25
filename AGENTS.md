@@ -14,6 +14,8 @@
 ## 工作约定
 
 - `reference/NeriPlayer-Android/` 为上游 Android 参考实现(gitignore,自带独立 git 历史):只读参考,不参与构建,不改动它。
+  - 源仓库 `https://github.com/cwuom/NeriPlayer`(origin 已指向直连);更新:`git -C reference/NeriPlayer-Android pull --ff-only`(master 为发布主线,dev 已全部合入)。
+  - 上游 tag 形如 `NeriPlayer-<短哈希>.<MMDDHHMM>`,与发布 APK 一一对应;「仓库最新」以 master 为准,tag 可能落后于 master。
 - 蓝图与进度在 `TODO.md`:开工前先读,只写「做什么」;完成一项勾一项,新想法先补进 TODO 再动手。
 - 音源 API 的请求参数/加密/签名细节,一律以 `reference/NeriPlayer-Android` 中对应实现为准,不要凭记忆或猜测写接口。
 - 本项目为 GPL-3.0(衍生自 NeriPlayer);涉及发布的改动注意合规标注。

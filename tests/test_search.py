@@ -22,8 +22,6 @@ from neriplayer_win.api.netease import NeteaseApiError, NeteaseClient, NeteaseSo
 from neriplayer_win.player.queue import BackupUrlRotator, QueueSong
 from neriplayer_win.ui import main_window as main_window_module
 from neriplayer_win.ui.main_window import (
-    _HEADER_BILI,
-    _HEADER_NETEASE,
     _ListRef,
     MainWindow,
 )
@@ -263,7 +261,7 @@ class TestSearchPageWiring:
             on_done(fetch())
             assert window.song_table.rowCount() == 2
             assert window._table_context == _ListRef("search", 0, "搜索:周")
-            assert window._table_header == _HEADER_NETEASE
+            assert window._table_header_source == "netease"
             assert window._table_songs[0].cover_url == "http://img/a"  # 缩略图可用
             assert not window._search_more_btn.isVisibleTo(window)  # 2*30 >= 5
         finally:
@@ -307,7 +305,7 @@ class TestSearchPageWiring:
             fetch, on_done, _on_error = scheduled[1]
             on_done(fetch())
             assert window.song_table.rowCount() == 1
-            assert window._table_header == _HEADER_BILI
+            assert window._table_header_source == "bili"
             assert window._table_songs[0].bvid == "BV1a"
         finally:
             _close(window)

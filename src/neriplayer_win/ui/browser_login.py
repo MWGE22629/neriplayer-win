@@ -9,6 +9,8 @@
 (登录 URL、成功判据 cookie 名、cookie 域过滤、标题/提示文案、UA、
 可选的 CDN 重写拦截器工厂)。注意坑:setUrlRequestInterceptor 不接管
 拦截器生命周期,必须持有引用防 GC(见过静默失效的事故)。
+标题/提示为语言相关文案:配置经 netease_web_login()/bili_web_login()
+工厂函数在弹窗时现造(总取当前语言),对话框本身无需重翻译。
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..api.netease.yd import NeteaseCdnFallbackInterceptor
+from ..i18n import tr
 
 _DESKTOP_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -58,31 +61,30 @@ class WebLoginConfig:
     ) = None  # 持引用防 GC;None 表示不需要 CDN 重写
 
 
-NETEASE_WEB_LOGIN = WebLoginConfig(
-    title="网易云音乐 · 网页登录",
-    login_url="https://music.163.com/#/login",
-    success_cookie="MUSIC_U",
-    cookie_host_suffix="163.com",
-    hint=(
-        "在下方页面中使用任意方式登录(扫码 / 手机号)。检测到登录成功后会自动完成;"
-        "若页面加载缓慢请稍候。"
-    ),
-    user_agent=_DESKTOP_UA,
-    interceptor_factory=lambda parent: NeteaseCdnFallbackInterceptor(parent),
-)
+def netease_web_login() -> WebLoginConfig:
+    """网易云网页登录配置(弹窗时现造,标题/提示随当前语言)。"""
+    return WebLoginConfig(
+        title=tr("weblogin.netease.title"),
+        login_url="https://music.163.com/#/login",
+        success_cookie="MUSIC_U",
+        cookie_host_suffix="163.com",
+        hint=tr("weblogin.netease.hint"),
+        user_agent=_DESKTOP_UA,
+        interceptor_factory=lambda parent: NeteaseCdnFallbackInterceptor(parent),
+    )
 
-BILI_WEB_LOGIN = WebLoginConfig(
-    title="哔哩哔哩 · 网页登录",
-    login_url="https://passport.bilibili.com/login",
-    success_cookie="SESSDATA",
-    cookie_host_suffix="bilibili.com",
-    hint=(
-        "在下方页面中使用任意方式登录(扫码 / 手机号 / 密码)。"
-        "检测到登录成功后会自动完成;若页面加载缓慢请稍候。"
-    ),
-    user_agent=_WINDOWS_UA,
-    interceptor_factory=None,  # B站域名本机全通(见 M2 连通性报告),无需重写
-)
+
+def bili_web_login() -> WebLoginConfig:
+    """B站网页登录配置(弹窗时现造,标题/提示随当前语言)。"""
+    return WebLoginConfig(
+        title=tr("weblogin.bili.title"),
+        login_url="https://passport.bilibili.com/login",
+        success_cookie="SESSDATA",
+        cookie_host_suffix="bilibili.com",
+        hint=tr("weblogin.bili.hint"),
+        user_agent=_WINDOWS_UA,
+        interceptor_factory=None,  # B站域名本机全通(见 M2 连通性报告),无需重写
+    )
 
 
 class BrowserLoginDialog(QDialog):
@@ -115,9 +117,9 @@ class BrowserLoginDialog(QDialog):
         hint = QLabel(config.hint)
         hint.setWordWrap(True)
 
-        done_button = QPushButton("我已完成登录")
+        done_button = QPushButton(tr("weblogin.done"))
         done_button.clicked.connect(self._finish)
-        cancel_button = QPushButton("取消")
+        cancel_button = QPushButton(tr("weblogin.cancel"))
         cancel_button.clicked.connect(self.reject)
 
         buttons = QHBoxLayout()
