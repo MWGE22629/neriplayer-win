@@ -15,9 +15,11 @@ import threading
 import time
 from typing import Any, Mapping
 from urllib.parse import urlencode
+from urllib.request import getproxies
 
 import httpx
 
+from ...log import get_logger
 from .models import BiliApiError, BiliQrLoginCheckResult, BiliQrLoginSession
 
 BILI_QR_GENERATE_URL = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
@@ -30,6 +32,8 @@ BILI_QR_WEB_UA = (
 )
 BILI_QR_NETWORK_RETRY_COUNT = 3
 BILI_QR_NETWORK_RETRY_DELAY_MS = 0.1
+
+_log = get_logger("bili.qr")
 
 
 def parse_set_cookie_header(header: str) -> tuple[str, str, bool] | None:
@@ -167,6 +171,10 @@ class BiliQrLoginClient:
         try:
             response = self._http.get(url, headers=headers)
         except httpx.HTTPError as error:
+            _log.warning(
+                "B站扫码网络请求失败 url=%s proxies=%r(%s: %s)",
+                url, dict(getproxies()), error.__class__.__name__, error,
+            )
             raise BiliApiError(
                 f"网络请求失败: {url}({error.__class__.__name__}: {error})"
             ) from error

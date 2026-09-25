@@ -103,7 +103,7 @@ wheels = [
 
 [[package]]
 name = "neriplayer-win"
-version = "0.6.0"
+version = "0.6.3"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

@@ -14,6 +14,10 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QObject, Signal
 
+from ..log import get_logger
+
+_log = get_logger("workers")
+
 
 class _AsyncRelay(QObject):
     done = Signal(object)
@@ -40,6 +44,7 @@ def run_async(
         try:
             result = fn()
         except Exception as error:  # noqa: BLE001 - 边界处统一转消息
+            _log.exception("后台任务失败:%s", error.__class__.__name__)
             relay.failed.emit(str(error) or error.__class__.__name__)
         else:
             relay.done.emit(result)

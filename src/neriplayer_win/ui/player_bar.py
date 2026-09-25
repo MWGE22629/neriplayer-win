@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSlider,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -77,6 +78,56 @@ def rounded_pixmap(source: QPixmap, size: int, radius: int) -> QPixmap:
     finally:
         painter.end()
     return result
+
+
+class SeekSlider(QSlider):
+    """进度滑条:点击任意位置即跳到该处,且可从该处直接继续拖动。
+
+    原生 QSlider 点击槽区是按页步进,且能否拖动取决于 style 的
+    hit-test(手柄按下才 setSliderDown)。这里左键按下/移动/释放全部
+    自管:按下即按点击位置取值并显式进入拖拽态,移动持续取值,释放时
+    setSliderDown(False) 照常发出 sliderReleased。信号语义与原生一致
+    (sliderPressed/sliderMoved/sliderReleased),上层 _dragging/seek
+    逻辑无需改动。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(Qt.Orientation.Horizontal)
+
+    def _set_value_at(self, x: float) -> None:
+        self.setValue(QStyle.sliderValueFromPosition(
+            self.minimum(), self.maximum(),
+            int(x), max(self.width() - 1, 1),
+        ))
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.isEnabled()
+            and self.maximum() > self.minimum()
+        ):
+            self.setSliderDown(True)
+            self._set_value_at(event.position().x())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if self.isSliderDown():
+            self._set_value_at(event.position().x())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.isSliderDown()
+        ):
+            self.setSliderDown(False)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class PlayerBar(QWidget):
@@ -155,7 +206,7 @@ class PlayerBar(QWidget):
         self.volume_icon_label.setFixedSize(20, 20)
         self.volume_icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.position_slider = QSlider(Qt.Orientation.Horizontal)
+        self.position_slider = SeekSlider()
         self.position_slider.setRange(0, 0)
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setRange(0, 100)
@@ -198,9 +249,9 @@ class PlayerBar(QWidget):
 
         self.position_slider.sliderPressed.connect(self._on_slider_pressed)
         self.position_slider.sliderReleased.connect(self._on_slider_released)
-        # 点击滑条任意位置直接跳转(QSlider 默认是按格移动,补鼠标事件)
-        self.position_slider.mousePressEvent = self._wrap_slider_mouse_press(
-            self.position_slider.mousePressEvent
+        # 拖动中时间标签跟随(实际 seek 仍在释放时发)
+        self.position_slider.sliderMoved.connect(
+            lambda value: self.current_time_label.setText(format_seconds(value))
         )
 
         self._apply_icons()
@@ -304,19 +355,3 @@ class PlayerBar(QWidget):
     def _on_slider_released(self) -> None:
         self._dragging = False
         self.seek_requested.emit(float(self.position_slider.value()))
-
-    def _wrap_slider_mouse_press(self, original_handler):
-        def handler(event):
-            if event.button() == Qt.MouseButton.LeftButton:
-                slider = self.position_slider
-                if slider.maximum() > slider.minimum():
-                    span = slider.maximum() - slider.minimum()
-                    ratio = event.position().x() / max(slider.width(), 1)
-                    value = slider.minimum() + int(span * min(max(ratio, 0.0), 1.0))
-                    slider.setValue(value)
-                    self.seek_requested.emit(float(value))
-                    event.accept()
-                    return
-            original_handler(event)
-
-        return handler

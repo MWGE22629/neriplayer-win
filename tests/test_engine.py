@@ -84,6 +84,28 @@ def test_play_until_end(qapp, engine, tmp_path):
         engine.stop()
 
 
+def test_play_url_clears_residual_pause(qapp, engine, tmp_path):
+    """暂停状态下点新歌应自动播放(pause 属性跨文件残留的回归)。"""
+    wav1 = tmp_path / "tone1.wav"
+    wav2 = tmp_path / "tone2.wav"
+    _make_wav(wav1, seconds=6)
+    _make_wav(wav2, seconds=6)
+
+    engine.play_url(str(wav1))
+    try:
+        assert _wait(qapp, lambda: engine.position() > 0.5, timeout_s=15)
+        engine.set_paused(True)
+        assert not engine.is_playing()
+
+        engine.play_url(str(wav2))  # 暂停中切新歌
+        assert _wait(
+            qapp, lambda: engine.position() > 0.3, timeout_s=15
+        ), "暂停残留:新歌加载后未自动播放"
+        assert engine.is_playing()
+    finally:
+        engine.stop()
+
+
 def test_pause_seek_volume_stop(qapp, engine, tmp_path):
     wav = tmp_path / "tone.wav"
     _make_wav(wav, seconds=6)

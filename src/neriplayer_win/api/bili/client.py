@@ -36,9 +36,11 @@ import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 from urllib.parse import quote, urlencode
+from urllib.request import getproxies
 
 import httpx
 
+from ...log import get_logger
 from .models import (
     BiliAccount,
     BiliApiError,
@@ -126,6 +128,8 @@ BILI_STREAM_HEADERS = {
 }
 
 DEFAULT_AUDIO_QUALITY = "high"
+
+_log = get_logger("bili")
 
 
 def build_bili_stream_headers() -> dict[str, str]:
@@ -737,6 +741,12 @@ class BiliClient:
     def __init__(self, timeout: httpx.Timeout | None = None) -> None:
         self._timeout = timeout or httpx.Timeout(connect=10.0, read=15.0, write=15.0, pool=30.0)
         self._http = httpx.Client(timeout=self._timeout, follow_redirects=True)
+        # 直连兜底客户端:主客户端读系统/环境代理(trust_env),代理进程
+        # 已退出的残留配置会让所有请求 WinError 10061;B站接口国内直连
+        # 总是可达,连接类失败时用它重试一次(见 _get_with_direct_fallback)
+        self._http_direct = httpx.Client(
+            timeout=self._timeout, follow_redirects=True, trust_env=False
+        )
 
         self._cookie_lock = threading.Lock()
         self._stored_cookies: dict[str, str] = {}
@@ -753,6 +763,7 @@ class BiliClient:
 
     def close(self) -> None:
         self._http.close()
+        self._http_direct.close()
 
     # -- 登录态(cookie)管理 --------------------------------------------------
 
@@ -787,6 +798,35 @@ class BiliClient:
             return stored
         return self._ensure_anon_cookies()
 
+    def _get_with_direct_fallback(
+        self, url: str, headers: dict[str, str]
+    ) -> httpx.Response:
+        """走代理路径的连接类失败(ConnectError/ConnectTimeout)时直连重试一次。
+
+        背景:httpx 默认读系统/环境代理,代理进程退出后的残留配置会让
+        请求表现为 WinError 10061(拒绝连接)——本机代理端口没人听,而非
+        B站不可达。直连重试对"真需代理"的用户无副作用(重试失败仍抛
+        原始异常,保留用户配置路径的报错语义);无任何代理配置时不重试,
+        连接失败即真实网络故障。
+        """
+        try:
+            return self._http.get(url, headers=headers)
+        except (httpx.ConnectError, httpx.ConnectTimeout) as error:
+            if not getproxies():
+                raise
+            _log.warning(
+                "代理路径连接失败,降级直连重试 url=%s(%s: %s)",
+                url, error.__class__.__name__, error,
+            )
+            try:
+                return self._http_direct.get(url, headers=headers)
+            except httpx.HTTPError as direct_error:
+                _log.warning(
+                    "直连重试仍失败 url=%s(%s: %s)",
+                    url, direct_error.__class__.__name__, direct_error,
+                )
+                raise error from direct_error
+
     def _execute_get_as_text(self, url: str) -> str:
         cookie_header = "; ".join(
             f"{k}={v}" for k, v in self._effective_cookies().items()
@@ -795,8 +835,14 @@ class BiliClient:
         if cookie_header:
             headers["Cookie"] = cookie_header
         try:
-            response = self._http.get(url, headers=headers)
+            response = self._get_with_direct_fallback(url, headers)
         except httpx.HTTPError as error:
+            # 环境代理快照随错误落盘:定位"系统/环境代理残留导致
+            # WinError 10061"类用户侧网络问题的关键证据
+            _log.warning(
+                "B站网络请求失败 url=%s proxies=%r(%s: %s)",
+                url, dict(getproxies()), error.__class__.__name__, error,
+            )
             raise BiliApiError(
                 f"网络请求失败: {url}({error.__class__.__name__}: {error})"
             ) from error

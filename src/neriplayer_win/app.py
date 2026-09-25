@@ -49,6 +49,9 @@ def _boost_process_priority() -> None:
 
 
 def main() -> int:
+    from .log import setup_logging
+
+    setup_logging()  # 尽早:后续启动阶段的问题也要能落盘
     app = QApplication(sys.argv)
     app.setApplicationName("NeriPlayer Win")
     app.setOrganizationName("NeriPlayer Win")

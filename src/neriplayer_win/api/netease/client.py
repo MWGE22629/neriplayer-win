@@ -34,9 +34,11 @@ import time
 from http.cookies import CookieError, SimpleCookie
 from typing import Any, Mapping
 from urllib.parse import urlencode, urlparse
+from urllib.request import getproxies
 
 import httpx
 
+from ...log import get_logger
 from . import crypto
 from .models import (
     NeteaseAccount,
@@ -56,6 +58,8 @@ from .models import (
 NETEASE_MAIN_HOST = "music.163.com"
 NETEASE_REQUEST_OS = "pc"
 NETEASE_REQUEST_APP_VERSION = "8.10.35"
+
+_log = get_logger("netease")
 
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
@@ -521,6 +525,12 @@ class NeteaseClient:
     def __init__(self, timeout: httpx.Timeout | None = None) -> None:
         self._timeout = timeout or httpx.Timeout(connect=10.0, read=15.0, write=15.0, pool=30.0)
         self._http = httpx.Client(timeout=self._timeout, follow_redirects=True)
+        # 直连兜底客户端(语义同 BiliClient._get_with_direct_fallback):
+        # 代理残留导致连接类失败时直连重试一次;网易虽可能被海外用户
+        # 反向依赖代理,但重试失败仍抛原始异常,对这类用户零副作用
+        self._http_direct = httpx.Client(
+            timeout=self._timeout, follow_redirects=True, trust_env=False
+        )
         self._session = _RequestSession({})
         # 扫码登录使用独立的 cookie 存储(对应 Kotlin 里独立的 NeteaseQrLoginClient)
         self._qr_cookie_store = _CookieStore()
@@ -528,6 +538,7 @@ class NeteaseClient:
 
     def close(self) -> None:
         self._http.close()
+        self._http_direct.close()
 
     # -- 登录态(cookie)管理 --------------------------------------------------
 
@@ -622,8 +633,33 @@ class NeteaseClient:
             return self._http.build_request("GET", request_url, headers=headers)
         raise NeteaseApiError(f"不支持的请求方法: {method}")
 
+    def _send_with_direct_fallback(self, request: httpx.Request) -> httpx.Response:
+        """走代理路径的连接类失败(ConnectError/ConnectTimeout)时直连重试一次。
+
+        语义同 BiliClient._get_with_direct_fallback:残留的失效代理配置
+        (WinError 10061)不该拖死全部请求;重发同一 request 安全——
+        本客户端请求体均为 bytes,httpx 对应的 ByteStream 可重复消费。
+        """
+        try:
+            return self._http.send(request)
+        except (httpx.ConnectError, httpx.ConnectTimeout) as error:
+            if not getproxies():
+                raise
+            _log.warning(
+                "代理路径连接失败,降级直连重试 url=%s(%s: %s)",
+                request.url, error.__class__.__name__, error,
+            )
+            try:
+                return self._http_direct.send(request)
+            except httpx.HTTPError as direct_error:
+                _log.warning(
+                    "直连重试仍失败 url=%s(%s: %s)",
+                    request.url, direct_error.__class__.__name__, direct_error,
+                )
+                raise error from direct_error
+
     def _send(self, request: httpx.Request) -> httpx.Response:
-        response = self._http.send(request)
+        response = self._send_with_direct_fallback(request)
         # 手工采集 Set-Cookie 进自管存储(对齐 CookieJar.saveFromResponse)
         self._session.save_response_cookies(
             str(request.url), response.headers.get_list("set-cookie")
@@ -655,6 +691,10 @@ class NeteaseClient:
         try:
             response = self._send(request)
         except httpx.HTTPError as error:
+            _log.warning(
+                "网易云网络请求失败 url=%s proxies=%r(%s: %s)",
+                url, dict(getproxies()), error.__class__.__name__, error,
+            )
             raise NeteaseApiError(f"网络请求失败: {url}({error.__class__.__name__}: {error})") from error
         return self._read_response(response)
 
@@ -1023,8 +1063,12 @@ class NeteaseClient:
             "POST", url, data=encrypted, headers=request_headers
         )
         try:
-            response = self._http.send(request)
+            response = self._send_with_direct_fallback(request)
         except httpx.HTTPError as error:
+            _log.warning(
+                "网易云扫码网络请求失败 url=%s proxies=%r(%s: %s)",
+                url, dict(getproxies()), error.__class__.__name__, error,
+            )
             raise NeteaseApiError(
                 f"网络请求失败: {url}({error.__class__.__name__}: {error})"
             ) from error

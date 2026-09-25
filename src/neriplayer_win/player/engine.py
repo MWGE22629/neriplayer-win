@@ -167,6 +167,10 @@ class PlayerEngine(QObject):
         self._idle_ticks = 0
         self._ever_played = False
         try:
+            # 点新歌即「立即播放」:pause 是 mpv 全局属性、跨文件残留,
+            # 不显式清除的话,此前暂停过再选新歌会加载完仍 paused,
+            # 表现为"选歌不自动播,要手动再按暂停/播放"
+            self._player.pause = False
             if headers:
                 options = build_http_header_fields_option(headers)
                 version = tuple(getattr(self._player, "mpv_version_tuple", (0, 0, 0)))
