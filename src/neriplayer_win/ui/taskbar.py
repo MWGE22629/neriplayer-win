@@ -36,8 +36,11 @@ from PySide6.QtCore import QObject, QSize, Signal
 from PySide6.QtGui import QColor, QIcon, QImage
 
 from ..i18n import tr
+from ..log import get_logger
 from .icons import tinted_icon_with_color
 from .media_keys import _MSG
+
+_log = get_logger("taskbar")
 
 WM_COMMAND = 0x0111
 # commctrl.h THBN_CLICKED = (0u-1801u) = 0xFFFFF8FF;进 HIWORD 16 位即 0xF8FF
@@ -223,6 +226,7 @@ class TaskbarThumbBar(QObject):
         self._add_buttons = None
         self._update_buttons = None
         self._release = None
+        self._native_seen = False  # 首条窗口过程消息留痕(通道接通证明)
         if sys.platform == "win32":
             self._created_msg = ctypes.windll.user32.RegisterWindowMessageW(
                 "TaskbarButtonCreated"
@@ -244,19 +248,47 @@ class TaskbarThumbBar(QObject):
             if bytes(event_type) != b"windows_generic_MSG":
                 return False
             msg = _MSG.from_address(int(message))
+            if not self._native_seen:
+                self._native_seen = True
+                _log.info(
+                    "nativeEvent 通道接通(首条消息 message=0x%X)", msg.message
+                )
             if (
                 self._created_msg
                 and msg.message == self._created_msg
                 and int(msg.hwnd or 0) == self._watch_hwnd
             ):
+                _log.info("收到 TaskbarButtonCreated(hwnd=%s)", self._watch_hwnd)
                 self._on_taskbar_created()
                 return False  # 让 Qt 继续处理
-            if msg.message != WM_COMMAND or int(msg.hwnd or 0) != self._hwnd:
+            if msg.message != WM_COMMAND:
                 return False
-            if ((msg.wParam >> 16) & 0xFFFF) != _THBN_CLICKED:
+            hwnd = int(msg.hwnd or 0)
+            hiword = (msg.wParam >> 16) & 0xFFFF
+            loword = msg.wParam & 0xFFFF
+            if hwnd != self._hwnd:
+                # 目标窗口不是我们注册的:仍留痕(点击路由异常的排查线索)
+                if hiword == _THBN_CLICKED:
+                    _log.info(
+                        "THBN_CLICKED 发到别的窗口(hwnd=%s 期望=%s id=0x%X)",
+                        hwnd, self._hwnd, loword,
+                    )
                 return False
-            return self._dispatch(msg.wParam & 0xFFFF)
-        except Exception:  # noqa: BLE001 - 窗口过程内绝不抛
+            if hiword != _THBN_CLICKED:
+                _log.info(
+                    "WM_COMMAND 非缩略图通知(hwnd=%s id=0x%X hi=0x%X)",
+                    hwnd, loword, hiword,
+                )
+                return False
+            dispatched = self._dispatch(loword)
+            _log.info(
+                "缩略图按钮点击 id=0x%X %s(hwnd=%s, attached=%s)",
+                loword, "已分发" if dispatched else "未知按钮(未分发)",
+                hwnd, self._attached,
+            )
+            return dispatched
+        except Exception as exc:  # noqa: BLE001 - 窗口过程内绝不抛
+            _log.exception("消息解析异常:%s", exc)
             return False
 
     # -- 属性 ----------------------------------------------------------------
@@ -313,8 +345,13 @@ class TaskbarThumbBar(QObject):
                 ctypes.c_long, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p,
             )
             self._punk = punk.value
-        except Exception:  # noqa: BLE001 - 增强能力,失败不影响主流程
+            _log.info(
+                "ITaskbarList3 就绪(TaskbarButtonCreated msg=0x%X)",
+                self._created_msg,
+            )
+        except Exception as exc:  # noqa: BLE001 - 增强能力,失败不影响主流程
             self._punk = None
+            _log.info("ITaskbarList3 初始化失败:%r", exc)
 
     # -- 附加与状态同步 --------------------------------------------------------
 
@@ -335,8 +372,18 @@ class TaskbarThumbBar(QObject):
             if hr == 0:
                 self._hwnd = hwnd
                 self._attached = True
+                _log.info(
+                    "缩略图按钮注册成功(hwnd=%s, 图标%d个, enabled=%s)",
+                    hwnd, len(self._icons), self._enabled,
+                )
                 self._refresh_buttons()  # 补发当前播放/禁用态
-        except Exception:  # noqa: BLE001 - 等任务栏按钮就绪消息再重试
+            else:
+                _log.info(
+                    "缩略图按钮注册被拒 hwnd=%s hr=0x%08X(等 TaskbarButtonCreated 重试)",
+                    hwnd, hr & 0xFFFFFFFF,
+                )
+        except Exception as exc:  # noqa: BLE001 - 等任务栏按钮就绪消息再重试
+            _log.info("缩略图按钮注册异常 hwnd=%s:%r", hwnd, exc)
             return
 
     def _on_taskbar_created(self) -> None:
@@ -355,7 +402,10 @@ class TaskbarThumbBar(QObject):
         if not self._attached and was_attached:
             self._attached = True
             self._hwnd = hwnd
+            _log.info("任务栏按钮未重建,Add 被拒后回落 Update 恢复状态")
             self._refresh_buttons()
+        elif self._attached:
+            _log.info("任务栏按钮重建后重新注册完成(hwnd=%s)", hwnd)
 
     def set_enabled(self, enabled: bool) -> None:
         """有无在播曲目:三键整体可用/禁用(未附加时只记状态)。"""
@@ -380,8 +430,13 @@ class TaskbarThumbBar(QObject):
             return
         try:
             buttons = self._make_buttons()
-            self._update_buttons(self._punk, self._hwnd, 3, ctypes.byref(buttons))
-        except Exception:  # noqa: BLE001 - 状态同步失败静默(UI 内仍有等价控制)
+            hr = self._update_buttons(self._punk, self._hwnd, 3, ctypes.byref(buttons))
+            _log.info(
+                "按钮状态刷新 hr=0x%08X(enabled=%s, playing=%s, hwnd=%s)",
+                hr & 0xFFFFFFFF, self._enabled, self._playing, self._hwnd,
+            )
+        except Exception as exc:  # noqa: BLE001 - 状态同步失败静默(UI 内仍有等价控制)
+            _log.info("按钮状态刷新异常:%r", exc)
             return
 
     # -- 按钮与图标 ------------------------------------------------------------
@@ -389,12 +444,17 @@ class TaskbarThumbBar(QObject):
     def _build_icons(self) -> None:
         if self._icons:
             return
-        color = QColor("#1F1F1F" if _system_taskbar_light() else "#FFFFFF")
+        light = _system_taskbar_light()
+        color = QColor("#1F1F1F" if light else "#FFFFFF")
         size = ctypes.windll.user32.GetSystemMetrics(_SM_CXSMICON) or 16
         for name in ("skip_previous", "play", "pause", "skip_next"):
             hicon = _hicon_from_icon(tinted_icon_with_color(name, color), size)
             if hicon is not None:
                 self._icons[name] = hicon
+        _log.info(
+            "图标构建:%s主题 %s, %dpx, %d个",
+            "系统" + ("浅" if light else "深"), color.name(), size, len(self._icons),
+        )
 
     def _make_buttons(self) -> ctypes.Array:
         flags = _THBF_ENABLED if self._enabled else _THBF_DISABLED
