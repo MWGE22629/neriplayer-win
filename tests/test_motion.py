@@ -530,7 +530,7 @@ class TestTaskbarWiring:
         import ctypes
 
         from neriplayer_win.ui.media_keys import _MSG
-        from neriplayer_win.ui.taskbar import _THBN_CLICKED, WM_COMMAND
+        from neriplayer_win.ui.taskbar import WM_COMMAND
 
         window = _make_window(qapp, monkeypatch, tmp_path)
         try:
@@ -543,7 +543,8 @@ class TestTaskbarWiring:
             msg = _MSG()
             msg.hwnd = bar._hwnd
             msg.message = WM_COMMAND
-            msg.wParam = (_THBN_CLICKED << 16) | 0x8002
+            # hi=0x1800:真机实测通知码(Win11 24H2),分发不依赖通知码
+            msg.wParam = (0x1800 << 16) | 0x8002
             msg.lParam = 0
             consumed, _result = window.nativeEvent(
                 b"windows_generic_MSG", ctypes.addressof(msg)

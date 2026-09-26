@@ -16,10 +16,15 @@ from neriplayer_win.ui.taskbar import (
     _ID_NEXT,
     _ID_PLAY_PAUSE,
     _ID_PREV,
-    _THBN_CLICKED,
     _THBF_DISABLED,
     _THBF_ENABLED,
 )
+
+# 真机日志实测(Win11 26100,2026-09-26)任务栏缩略图按钮点击的 HIWORD;
+# 与 commctrl.h 文档值 (0u-1801u)&0xFFFF=0xF8F6 不符,分发按 id 白名单
+# 宽松匹配,两种通知码都必须触发
+_HI_REAL = 0x1800
+_HI_DOC = 0xF8F6
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="仅 Windows")
 
@@ -28,7 +33,7 @@ _app = QApplication.instance() or QApplication([])
 _HOUSE = 0x1234  # 伪窗口句柄(仅驱动消息匹配逻辑)
 
 
-def _make_command(hwnd: int, command_id: int, hiword: int = _THBN_CLICKED) -> _MSG:
+def _make_command(hwnd: int, command_id: int, hiword: int = _HI_REAL) -> _MSG:
     msg = _MSG()
     msg.hwnd = hwnd
     msg.message = WM_COMMAND
@@ -84,17 +89,24 @@ class TestThumbBarDispatch:
         finally:
             bar.shutdown()
 
-    def test_wrong_notification_code_ignored(self):
-        """WM_COMMAND 但 HIWORD 不是 THBN_CLICKED(如菜单加速键)不误触发。"""
+    def test_notification_code_lenient(self):
+        """通知码不做门槛(真机 0x1800 ≠ 文档 0xF8F6):已知按钮 id 在
+        两种通知码下都必须分发;未知 id 任意通知码都不分发。"""
         bar = _make_bar()
         try:
             fired: list[str] = []
             bar.play_pause_requested.connect(lambda: fired.append("pp"))
-            msg = _make_command(_HOUSE, _ID_PLAY_PAUSE, hiword=0)
+            for hiword in (_HI_REAL, _HI_DOC, 0):
+                fired.clear()
+                msg = _make_command(_HOUSE, _ID_PLAY_PAUSE, hiword=hiword)
+                assert bar.handle_native_event(
+                    b"windows_generic_MSG", ctypes.addressof(msg)
+                ) is True
+                assert fired == ["pp"]
+            msg = _make_command(_HOUSE, 0x9001, hiword=_HI_REAL)
             assert bar.handle_native_event(
                 b"windows_generic_MSG", ctypes.addressof(msg)
             ) is False
-            assert fired == []
         finally:
             bar.shutdown()
 

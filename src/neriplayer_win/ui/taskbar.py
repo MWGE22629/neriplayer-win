@@ -43,8 +43,9 @@ from .media_keys import _MSG
 _log = get_logger("taskbar")
 
 WM_COMMAND = 0x0111
-# commctrl.h THBN_CLICKED = (0u-1801u) = 0xFFFFF8FF;进 HIWORD 16 位即 0xF8FF
-_THBN_CLICKED = 0xF8FF
+# commctrl.h 文档值 THBN_CLICKED = (0u-1801u),进 HIWORD 16 位即 0xF8F6。
+# 真机日志(2026-09-26,Win11 26100)实测任务栏发 0x1800,与文档值不符
+# ——故通知码不做门槛,仅按按钮 id 白名单匹配并留痕。
 
 # 按钮命令 id(WM_COMMAND 的 LOWORD);避开 Qt 菜单/控件常用的低位段
 _ID_PREV = 0x8001
@@ -239,7 +240,9 @@ class TaskbarThumbBar(QObject):
         处理两类消息:
         - TaskbarButtonCreated(任务栏按钮就绪/重建):触发附加重试,
           不吞消息;
-        - WM_COMMAND + THBN_CLICKED + 已知按钮 id:分发为信号并吞掉。
+        - WM_COMMAND(LOWORD=按钮 id):按 id 白名单分发并吞掉。通知码
+          (HIWORD)不做门槛——真机实测 Win11 24H2 发 0x1800 而非文档值
+          0xF8F6,仅留痕供观察;按钮 id 为我们独有,无误触风险。
 
         返回 True 表示消息已消费(nativeEvent 应短路 Qt 默认处理)。
         解析失败/非目标消息一律返回 False,绝不抛出。
@@ -268,22 +271,17 @@ class TaskbarThumbBar(QObject):
             loword = msg.wParam & 0xFFFF
             if hwnd != self._hwnd:
                 # 目标窗口不是我们注册的:仍留痕(点击路由异常的排查线索)
-                if hiword == _THBN_CLICKED:
+                if loword in (_ID_PREV, _ID_PLAY_PAUSE, _ID_NEXT):
                     _log.info(
-                        "THBN_CLICKED 发到别的窗口(hwnd=%s 期望=%s id=0x%X)",
+                        "缩略图点击发到别的窗口(hwnd=%s 期望=%s id=0x%X)",
                         hwnd, self._hwnd, loword,
                     )
                 return False
-            if hiword != _THBN_CLICKED:
-                _log.info(
-                    "WM_COMMAND 非缩略图通知(hwnd=%s id=0x%X hi=0x%X)",
-                    hwnd, loword, hiword,
-                )
-                return False
             dispatched = self._dispatch(loword)
             _log.info(
-                "缩略图按钮点击 id=0x%X %s(hwnd=%s, attached=%s)",
-                loword, "已分发" if dispatched else "未知按钮(未分发)",
+                "缩略图按钮点击 id=0x%X hi=0x%X %s(hwnd=%s, attached=%s)",
+                loword, hiword,
+                "已分发" if dispatched else "未知按钮(未分发)",
                 hwnd, self._attached,
             )
             return dispatched
