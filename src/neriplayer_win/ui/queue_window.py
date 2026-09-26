@@ -20,7 +20,9 @@ class QueueWindow(QWidget):
     jump_requested = Signal(int)
 
     def __init__(self, queue: PlayQueue, parent: QWidget | None = None) -> None:
-        super().__init__(parent, Qt.WindowType.Window)
+        # Tool 窗口:不占任务栏按钮——否则与主窗形成分组预览,而任务栏
+        # 缩略图工具栏(播放控制三键)只在单窗口预览下显示
+        super().__init__(parent, Qt.WindowType.Tool)
         self.setWindowTitle(tr("queue.title"))
         self.resize(440, 540)
         self._queue = queue

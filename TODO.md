@@ -134,6 +134,52 @@ Windows 桌面音乐播放器,自用优先:网易云 + B站两个音源,
       (2026-09-25 实现;回归测试 26 例覆盖文案表/持久化/滑块交互/
       全量重翻译/双语回放/窗口高度回归;离屏+windows 双平台渲染经视觉验收)
 
+- [x] Win 任务栏缩略图工具栏:鼠标悬停任务栏图标的窗口预览框底部
+      上一首/播放暂停/下一首按钮,不点主窗即可控制播放(Windows
+      ITaskbarList3 ThumbBar,ctypes 直调 COM,播放态图标/禁用态/
+      tooltip 随状态与语言同步)
+      (2026-09-26 实现:ui/taskbar.py,CoCreateInstance 拿 ITaskbarList3
+      vtable 直调 ThumbBarAddButtons/Update;SVG 图标按系统明暗
+      AppsUseLightTheme 染色经 CreateIconIndirect 转 HICON;按钮点击
+      经 WM_COMMAND 原生过滤器转信号(与媒体键同套路);附加时机=
+      showEvent 即试 + TaskbarButtonCreated 消息自动重试;真机 windows
+      平台验证按钮注册成功;回归 7 例)
+      (2026-09-26 修复真机不可见:① 托盘隐藏→重显后任务栏按钮重建、
+      注册失效不重挂——TaskbarButtonCreated 现强制重加(Add 被拒回退
+      Update),真机验证往返后附加保持;② 队列窗口 Qt.Window 与主窗
+      分组,而分组预览不显示工具栏(系统行为)——改 Qt.Tool 不进
+      任务栏;③ 图标配色误读 AppsUseLightTheme,预览页实随
+      SystemUsesLightTheme(混搭主题下白上白/黑上黑不可见)——改读
+      系统主题键;④ HICON 像素回读回归,防全透明隐形图标;回归 +4 例)
+
+- [x] 动效打磨(借鉴 Android 端参数体系:FastOutSlowIn、进 220-300ms /
+      出 120-250ms、缩放淡入过渡、防闪延迟):
+      ① 播放/暂停按钮图标切换缩放+淡入过渡(A 端 AnimatedContent)
+      ② 播放条封面切歌交叉淡入,不再闪占位图(A 端 900ms 防闪思路)
+      ③ 播放条橡皮筋横滑切上一首/下一首(A 端 MiniPlayer 手势:
+        指数阻尼+阈值+回弹)
+      ④ 歌曲表「正在播放」行均衡器跳动条指示(A 端三根条,暂停回落)
+      ⑤ 中央页面切换快出慢进滑动过渡(A 端 Tab 转场 70/330ms)
+      (2026-09-26 实现:① AnimatedIconButton 200ms OutCubic 交叉缩放,
+      同实例图标跳过防重放;② _CoverLabel 200ms 交叉淡入 + 900ms 延迟
+      清空可被新封面取消;③ _SwipeHost 指数阻尼(峰值 52px/阈值 72px/
+      弹回 200ms),按住封面+信息块横滑;④ 序号列委托画三根正弦条
+      (周期 520/680/600ms 错相,~30fps 只重绘当前行,暂停 180ms 回落,
+      行号随切歌/换表重算);⑤ _SlideStack 旧页截图 120ms 快出 +
+      新页 300ms 慢进,过渡中重切即时收敛;回归 22 例覆盖阻尼数学/
+      手势阈值/图标过渡/防闪/页面切换/均衡器状态机)
+
+- [x] 任务栏歌名显示:起播后窗口标题(=任务栏文案)换为歌名,宽度
+      规范到与「NeriPlayer Win」恒定一致——过长按 … 截断、过短补空格,
+      任务栏按钮宽度不随歌名抖动;停止播放/播完队尾恢复基础标题
+      (2026-09-26 实现:taskbar_title 以 QFontMetrics 量基准宽,超宽
+      ElideRight 截断,不足按空格步进补齐(余量<一个空格);起播设置、
+      媒体停止/顺序播完恢复,暂停与播放失败保持歌名;回归 7 例覆盖
+      截断/补齐/CJK 宽度/生命周期)
+      (2026-09-26 修复等宽无效:Win11 任务栏文本层(XAML/DirectWrite)
+      折叠尾随普通空格,补齐改用 NBSP(U+00A0)——不折叠且渲染为等宽
+      空白;回归同步更新)
+
 - [x] 播放动态取色(对齐 Android):播放歌曲时从封面提取主色,整个
       界面随之柔和变色;关播/无封面/关开关回默认冻结色板
       (2026-09-25 实现,对照 reference/NeriPlayer-Android 调研:

@@ -1,24 +1,38 @@
 from __future__ import annotations
 
+import math
 import sys
 import time
 from dataclasses import dataclass
 
 from PySide6.QtCore import (
     QEasingCurve,
+    QParallelAnimationGroup,
+    QPoint,
     QPointF,
     QPropertyAnimation,
     QRect,
+    QRectF,
     QSize,
     Qt,
     QTimer,
+    QVariantAnimation,
     Signal,
 )
-from PySide6.QtGui import QColor, QDropEvent, QIcon, QPainter, QPixmap, QPolygonF
+from PySide6.QtGui import (
+    QColor,
+    QDropEvent,
+    QFontMetrics,
+    QIcon,
+    QPainter,
+    QPixmap,
+    QPolygonF,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QButtonGroup,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -88,6 +102,7 @@ from .media_keys import MediaKeyHandler
 from .player_bar import PlayerBar, format_seconds, rounded_pixmap
 from .queue_window import QueueWindow
 from .settings_page import SettingsPage
+from .taskbar import TaskbarThumbBar
 from .theme import ThemeManager
 from .textsafe import sanitize_ui_text
 from .tray import TrayController
@@ -96,6 +111,34 @@ from .workers import run_async
 _PAGE_LOGIN = 0
 _PAGE_TABLE = 1
 _PAGE_SETTINGS = 2
+
+# 基础窗口标题(品牌名,不随语言变):任务栏歌名显示的宽度基准
+_TITLE_BASE = "NeriPlayer Win"
+
+# 补齐用空白字符:Win11 任务栏文本层(XAML/DirectWrite)会折叠尾随
+# 普通空格(补了看不见),NBSP 不折叠且渲染为等宽空白
+_TITLE_PAD = "\u00a0"
+
+
+def taskbar_title(text: str, metrics: QFontMetrics) -> str:
+    """歌名 -> 与基础标题等宽的任务栏文案。
+
+    过长按 … 右截断;过短补 NBSP,补完宽度距基准不超过一个空白宽
+    (普通空格会被任务栏文本层折叠,见 _TITLE_PAD)。目标:任务栏/
+    预览页文案在切歌间保持等长,不随歌名长短抖动。空歌名回落基础标题。
+    """
+    target = metrics.horizontalAdvance(_TITLE_BASE)
+    if not text:
+        return _TITLE_BASE
+    width = metrics.horizontalAdvance(text)
+    if width > target:
+        return metrics.elidedText(text, Qt.TextElideMode.ElideRight, target)
+    blank = metrics.horizontalAdvance(_TITLE_PAD)
+    if blank <= 0:
+        blank = metrics.horizontalAdvance(" ") or 1
+    padded = text + _TITLE_PAD * int((target - width) // blank)
+    return padded
+
 
 def _header_netease() -> list[str]:
     """网易云歌曲表表头(语言相关,现算现用)。"""
@@ -330,6 +373,207 @@ class _CoverColumnDelegate(QStyledItemDelegate):
         )
 
 
+class _SlideStack(QStackedWidget):
+    """中央页面切换过渡(借鉴 A 端 Tab 转场「快出慢进」)。
+
+    旧页先 grab 截图盖在最上层,120ms 淡出+顺向滑移让位(快出);
+    新页同时从逆向 28px 滑入+淡入,300ms OutCubic 归位(慢进)。
+    不可见(启动初始化/最小化)或索引未变时直接切换;过渡中再次
+    切换:立即清理在途动画,以最新目标重放,不排队。
+    """
+
+    _OUT_MS = 120
+    _IN_MS = 300
+    _OUT_SHIFT = 40
+    _IN_SHIFT = 28
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._overlay: QLabel | None = None
+        self._out_group: QParallelAnimationGroup | None = None
+        self._in_group: QParallelAnimationGroup | None = None
+        self._in_widget: QWidget | None = None
+
+    def setCurrentIndex(self, index: int) -> None:  # noqa: N802 - Qt 命名
+        current = self.currentIndex()
+        if (
+            index == current
+            or index < 0
+            or index >= self.count()
+            or not self.isVisible()
+        ):
+            super().setCurrentIndex(index)
+            return
+        self._cleanup_transition()
+        snapshot = self.currentWidget().grab()
+        direction = 1 if index > current else -1
+        super().setCurrentIndex(index)
+        self._start_transition(snapshot, direction)
+
+    def _start_transition(self, snapshot: QPixmap, direction: int) -> None:
+        curve = QEasingCurve.Type.OutCubic
+        # 旧页:截图 overlay 顺向滑出+淡出(快出)
+        self._overlay = QLabel(self)
+        self._overlay.setPixmap(snapshot)
+        self._overlay.setGeometry(self.rect())
+        self._overlay.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        self._overlay.show()
+        self._overlay.raise_()
+        overlay_effect = QGraphicsOpacityEffect(self._overlay)
+        overlay_effect.setOpacity(1.0)
+        self._overlay.setGraphicsEffect(overlay_effect)
+        overlay_slide = QPropertyAnimation(self._overlay, b"pos", self)
+        overlay_slide.setDuration(self._OUT_MS)
+        overlay_slide.setEasingCurve(curve)
+        overlay_slide.setEndValue(
+            QPoint(direction * self._OUT_SHIFT, self._overlay.y())
+        )
+        overlay_fade = QPropertyAnimation(overlay_effect, b"opacity", self)
+        overlay_fade.setDuration(self._OUT_MS)
+        overlay_fade.setEasingCurve(curve)
+        overlay_fade.setEndValue(0.0)
+        self._out_group = QParallelAnimationGroup(self)
+        self._out_group.addAnimation(overlay_slide)
+        self._out_group.addAnimation(overlay_fade)
+        self._out_group.finished.connect(self._on_out_finished)
+        self._out_group.start()
+
+        # 新页:逆向滑入+淡入(慢进)
+        new_widget = self.currentWidget()
+        self._in_widget = new_widget
+        new_widget.move(new_widget.x() - direction * self._IN_SHIFT, new_widget.y())
+        in_effect = QGraphicsOpacityEffect(new_widget)
+        in_effect.setOpacity(0.0)
+        new_widget.setGraphicsEffect(in_effect)
+        in_slide = QPropertyAnimation(new_widget, b"pos", self)
+        in_slide.setDuration(self._IN_MS)
+        in_slide.setEasingCurve(curve)
+        in_slide.setEndValue(QPoint(0, 0))
+        in_fade = QPropertyAnimation(in_effect, b"opacity", self)
+        in_fade.setDuration(self._IN_MS)
+        in_fade.setEasingCurve(curve)
+        in_fade.setEndValue(1.0)
+        self._in_group = QParallelAnimationGroup(self)
+        self._in_group.addAnimation(in_slide)
+        self._in_group.addAnimation(in_fade)
+        self._in_group.finished.connect(self._on_in_finished)
+        self._in_group.start()
+
+    def _on_out_finished(self) -> None:
+        if self._overlay is not None:
+            self._overlay.hide()
+            self._overlay.deleteLater()
+            self._overlay = None
+        if self._out_group is not None:
+            self._out_group.deleteLater()
+            self._out_group = None
+
+    def _on_in_finished(self) -> None:
+        if self._in_widget is not None:
+            self._in_widget.setGraphicsEffect(None)
+            self._in_widget.move(0, 0)
+            self._in_widget = None
+        if self._in_group is not None:
+            self._in_group.deleteLater()
+            self._in_group = None
+
+    def _cleanup_transition(self) -> None:
+        """切换中又有新切换:停掉在途动画并复位,不排队。"""
+        self._on_out_finished()
+        self._on_in_finished()
+        if self._out_group is not None:
+            self._out_group.stop()
+        if self._in_group is not None:
+            self._in_group.stop()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().resizeEvent(event)
+        if self._overlay is not None:
+            self._overlay.setGeometry(self.rect())
+
+
+# -- 正在播放均衡器条(A 端 RecentScreen 三根条,暂停回落) --------------------
+_EQ_PERIODS_MS = (520.0, 680.0, 600.0)  # 三根条周期互异,相位天然错开
+_EQ_PHASES = (0.0, 0.33, 0.66)
+_EQ_BAR_MIN_MAX = ((5.0, 12.0), (7.0, 15.0), (5.0, 11.0))  # 各条高度区间 px
+_EQ_BAR_WIDTH = 3
+_EQ_BAR_GAP = 2
+_EQ_TICK_MS = 33  # 相位驱动 ~30fps(条幅变化平缓,无需 60fps)
+_EQ_LEVEL_MS = 180  # 播放<->暂停 整体高度过渡(A 端暂停回落时长)
+
+
+@dataclass
+class _EqState:
+    """均衡器条的共享状态:MainWindow 驱动,委托只读。
+
+    row 为当前播放行(不在当前表则为 None);level 1=跳动 0=平齐
+    (播放态过渡);phase_ms 为累计相位,驱动条的正弦起伏。
+    """
+
+    row: int | None = None
+    level: float = 0.0
+    phase_ms: float = 0.0
+
+
+class _NowPlayingBarsDelegate(QStyledItemDelegate):
+    """歌曲表序号列:当前播放行以三根均衡器条替代序号。
+
+    行不匹配时照默认绘制序号;匹配时背景(选中/交替行)仍走默认
+    绘制,仅替换内容层。暂停时条随 level 回落到最低高度平齐。
+    """
+
+    def __init__(self, state: _EqState, parent=None) -> None:
+        super().__init__(parent)
+        self._state = state
+
+    def paint(self, painter, option, index) -> None:  # noqa: N802 - Qt 命名
+        if index.row() == self._state.row:
+            view_option = QStyleOptionViewItem(option)
+            self.initStyleOption(view_option, index)
+            view_option.text = ""
+            view_option.icon = QIcon()
+            widget = view_option.widget
+            style = widget.style() if widget is not None else QApplication.style()
+            style.drawControl(
+                QStyle.ControlElement.CE_ItemViewItem, view_option, painter, widget
+            )
+            self._paint_bars(painter, option.rect)
+            return
+        super().paint(painter, option, index)
+
+    def _paint_bars(self, painter: QPainter, rect: QRect) -> None:
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(theme.current_palette()["primary"]))
+        center_x = rect.center().x()
+        center_y = rect.center().y()
+        total_width = 3 * _EQ_BAR_WIDTH + 2 * _EQ_BAR_GAP
+        x = center_x - total_width // 2
+        for i in range(3):
+            minimum, maximum = _EQ_BAR_MIN_MAX[i]
+            wave = 0.5 + 0.5 * math.sin(
+                2 * math.pi
+                * (self._state.phase_ms / _EQ_PERIODS_MS[i] + _EQ_PHASES[i])
+            )
+            height = minimum + (maximum - minimum) * wave * self._state.level
+            height = max(minimum, height)
+            painter.drawRoundedRect(
+                QRectF(
+                    x,
+                    center_y - height / 2,
+                    _EQ_BAR_WIDTH,
+                    height,
+                ),
+                1.5,
+                1.5,
+            )
+            x += _EQ_BAR_WIDTH + _EQ_BAR_GAP
+        painter.restore()
+
+
 class _SourceBar(QWidget):
     """搜索来源栏:网易云|B站 平铺两半,顶部一条滑动指示线代表选中。
 
@@ -527,7 +771,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("NeriPlayer Win")
+        self.setWindowTitle(_TITLE_BASE)
         self.resize(1080, 680)
 
         self._store = LocalStore()
@@ -639,6 +883,22 @@ class MainWindow(QMainWindow):
         self.table_stack.addWidget(self.song_table)  # 0
         self.table_stack.addWidget(self._empty_state)  # 1
 
+        # 正在播放均衡器条:状态共享给序号列委托,timer 驱动相位(~30fps,
+        # 只重绘当前行),播放态经 _eq_level 过渡(A 端暂停回落 180ms)
+        self._eq_state = _EqState()
+        self.song_table.setItemDelegateForColumn(
+            _TABLE_COL_NUMBER, _NowPlayingBarsDelegate(self._eq_state, self.song_table)
+        )
+        self._playing = False
+        self._eq_last_tick = time.monotonic()
+        self._eq_timer = QTimer(self)
+        self._eq_timer.setInterval(_EQ_TICK_MS)
+        self._eq_timer.timeout.connect(self._eq_tick)
+        self._eq_level = QVariantAnimation(self)
+        self._eq_level.setDuration(_EQ_LEVEL_MS)
+        self._eq_level.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._eq_level.valueChanged.connect(self._on_eq_level)
+
         # 搜索页头:输入框(半宽居中,两行高)+ 来源栏(网易云|B站 各半宽,
         # 两行高);只在搜索模式显示,结果直接落下方现有歌曲表
         self._search_input = QLineEdit()
@@ -702,7 +962,7 @@ class MainWindow(QMainWindow):
         self.settings_page = SettingsPage()
         self._wire_settings_page()
 
-        self.central_stack = QStackedWidget()
+        self.central_stack = _SlideStack()
         self.central_stack.addWidget(self.login_page)  # 0
         self.central_stack.addWidget(table_page)  # 1
         self.central_stack.addWidget(self.settings_page)  # 2
@@ -727,9 +987,12 @@ class MainWindow(QMainWindow):
         self.sidebar.itemCollapsed.connect(self._on_sidebar_section_toggled)
 
         # -- 底部播放条 -------------------------------------------------------
+        # 任务栏缩略图工具栏在 _setup_taskbar 才创建;先置 None,
+        # _set_play_controls_active(_on_playing_changed 等)全程可安全判空
+        self._taskbar: TaskbarThumbBar | None = None
         self.player_bar = PlayerBar()
         self.player_bar.setObjectName("playerBar")
-        self.player_bar.set_active(False)
+        self._set_play_controls_active(False)
         if self.engine is not None:
             self._wire_engine()
         self._wire_player_bar()
@@ -777,6 +1040,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(app_icon())
         self._setup_tray(tray_icon(self.themes.name))
         self._setup_media_keys()
+        self._setup_taskbar()
 
         self._rebuild_sidebar()
         self._update_table_empty_state()
@@ -1575,6 +1839,7 @@ class MainWindow(QMainWindow):
         self._table_context = None
         self.song_table.setRowCount(0)
         self._cover_loader.preload([])  # 作废仍在途的缩略图预取
+        self._update_playing_row()  # 均衡器条随清表复位
         self._update_table_empty_state()
 
     def _set_table_songs(
@@ -1614,6 +1879,7 @@ class MainWindow(QMainWindow):
             )
             self.song_table.setItem(row, 4, QTableWidgetItem(duration))
         self._preload_table_covers()
+        self._update_playing_row()  # 重填后当前曲行号重算(均衡器条跟行)
         self._update_table_empty_state()
 
     # -- 表格封面缩略图 -----------------------------------------------------
@@ -1649,6 +1915,83 @@ class MainWindow(QMainWindow):
             item = self.song_table.item(row, _TABLE_COL_COVER)
             if item is not None:
                 item.setIcon(icon)
+
+    # -- 正在播放均衡器指示 ---------------------------------------------------
+
+    def _update_playing_row(self) -> None:
+        """当前播放曲在表中的行号(source+id 匹配;不在当前表为 None)。"""
+        active = self._active
+        row = None
+        if active is not None:
+            song = active.song
+            row = next(
+                (
+                    r
+                    for r, item in enumerate(self._table_songs)
+                    if item.source == song.source and item.id == song.id
+                ),
+                None,
+            )
+        if row == self._eq_state.row:
+            return
+        old_row = self._eq_state.row
+        self._eq_state.row = row
+        for candidate in (old_row, row):
+            self._repaint_table_row(candidate)
+        if self._playing and row is not None:
+            self._eq_timer.start()
+
+    def _repaint_table_row(self, row: int | None) -> None:
+        if row is None or row >= self.song_table.rowCount():
+            return
+        item = self.song_table.item(row, _TABLE_COL_NUMBER)
+        if item is not None:
+            self.song_table.viewport().update(
+                self.song_table.visualItemRect(item)
+            )
+
+    def _eq_set_active(self, playing: bool) -> None:
+        """播放态:条的跳动幅度 level 在 1<->0 间过渡;仅播放且当前行
+        在表内时跑相位 timer(暂停时条平齐,无需驱动)。"""
+        self._playing = playing
+        self._eq_level.stop()
+        self._eq_level.setStartValue(float(self._eq_state.level))
+        self._eq_level.setEndValue(1.0 if playing else 0.0)
+        self._eq_level.start()
+        if playing:
+            if self._eq_state.row is not None:
+                self._eq_last_tick = time.monotonic()
+                self._eq_timer.start()
+        else:
+            self._eq_timer.stop()
+            # 回落动画本身需要重绘进度条上的行
+            self._repaint_table_row(self._eq_state.row)
+
+    def _on_eq_level(self, value) -> None:
+        self._eq_state.level = float(value)
+        self._repaint_table_row(self._eq_state.row)
+
+    def _eq_tick(self) -> None:
+        now = time.monotonic()
+        self._eq_state.phase_ms = (
+            self._eq_state.phase_ms + (now - self._eq_last_tick) * 1000.0
+        ) % 3_600_000.0  # 取模防累计溢出(不影响三周期相位)
+        self._eq_last_tick = now
+        self._repaint_table_row(self._eq_state.row)
+
+    # -- 任务栏歌名标题 -------------------------------------------------------
+
+    def _apply_song_window_title(self) -> None:
+        """起播:窗口标题(=任务栏文案)换成歌名,宽度规范到与基础标题
+        一致(taskbar_title);暂停/失败保持歌名不回退,停止/播完才恢复。"""
+        if self._active is None:
+            return
+        self.setWindowTitle(
+            taskbar_title(self._active.song.title, QFontMetrics(self.font()))
+        )
+
+    def _reset_window_title(self) -> None:
+        self.setWindowTitle(_TITLE_BASE)
 
     # -- 搜索 ----------------------------------------------------------------
 
@@ -1983,8 +2326,10 @@ class MainWindow(QMainWindow):
         self._active = _ActivePlay(
             song=song, rotator=rotator, headers=headers, from_prefetch=from_prefetch
         )
+        self._update_playing_row()  # 新起播:均衡器条移到新行
         self._play_fail_count = 0  # 成功发起播放:连续失败计数复位
-        self.player_bar.set_active(True)
+        self._set_play_controls_active(True)
+        self._apply_song_window_title()  # 任务栏文案换为歌名(等宽规范)
         self.statusBar().showMessage(
             status or tr("play.playing", title=song.title, quality="")
         )
@@ -2246,6 +2591,7 @@ class MainWindow(QMainWindow):
         index = self._queue.advance_ended()
         if index is None:
             self.player_bar.set_playing(False)
+            self._reset_window_title()  # 顺序播完队尾:任务栏恢复基础标题
             self.statusBar().showMessage(tr("play.finished"))
             return
         self._play_at(index)
@@ -2357,6 +2703,8 @@ class MainWindow(QMainWindow):
             self._queue_window.retranslate()
         if self._tray is not None:
             self._tray.retranslate()
+        if self._taskbar is not None:
+            self._taskbar.retranslate()
         self.statusBar().showMessage(tr("common.ready"))
 
     def _on_theme_changed(self, name: str) -> None:
@@ -2413,7 +2761,7 @@ class MainWindow(QMainWindow):
 
     def _wire_engine(self) -> None:
         self.engine.progress.connect(self.player_bar.set_progress)
-        self.engine.playing_changed.connect(self.player_bar.set_playing)
+        self.engine.playing_changed.connect(self._on_playing_changed)
         self.engine.track_ended.connect(self._on_track_ended)
         self.engine.load_failed.connect(self._on_load_failed)
         self.engine.error.connect(
@@ -2421,6 +2769,13 @@ class MainWindow(QMainWindow):
                 tr("play.error", message=message)
             )
         )
+
+    def _on_playing_changed(self, playing: bool) -> None:
+        """播放态变化:播放条按钮 / 任务栏缩略图按钮 / 歌曲表均衡器条同步。"""
+        self.player_bar.set_playing(playing)
+        if self._taskbar is not None:
+            self._taskbar.set_playing(playing)
+        self._eq_set_active(playing)
 
     def _wire_player_bar(self) -> None:
         bar = self.player_bar
@@ -2435,6 +2790,12 @@ class MainWindow(QMainWindow):
     def _toggle_pause(self) -> None:
         if self.engine is not None:
             self.engine.toggle_pause()
+
+    def _set_play_controls_active(self, active: bool) -> None:
+        """播放控制可用态:播放条与任务栏缩略图按钮同步启用/禁用。"""
+        self.player_bar.set_active(active)
+        if self._taskbar is not None:
+            self._taskbar.set_enabled(active)
 
     def _on_seek_requested(self, position_s: float) -> None:
         if self.engine is not None:
@@ -2477,10 +2838,34 @@ class MainWindow(QMainWindow):
         keys.next_requested.connect(self._play_next)
         keys.prev_requested.connect(self._play_prev)
 
+    def _setup_taskbar(self) -> None:
+        """任务栏缩略图工具栏(增强能力,失败静默降级为空操作)。
+
+        附加(ThumbBarAddButtons)在 showEvent 里做:窗口得先有
+        任务栏按钮;这里只建对象与接信号。
+        """
+        try:
+            self._taskbar = TaskbarThumbBar(self)
+        except Exception:  # noqa: BLE001 - 任务栏属增强能力,绝不崩启动
+            self._taskbar = None
+            return
+        bar = self._taskbar
+        bar.prev_requested.connect(self._play_prev)
+        bar.play_pause_requested.connect(self._toggle_pause)
+        bar.next_requested.connect(self._play_next)
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().showEvent(event)
+        # 缩略图工具栏需窗口已有任务栏按钮:每次显示时尝试附加,
+        # 成功一次即固定(离屏/COM 不可用时 attach 恒失败,静默重试无害)
+        if self._taskbar is not None:
+            self._taskbar.attach(int(self.winId()))
+
     def _on_media_stop(self) -> None:
         if self.engine is not None:
             self.engine.stop()
         self.player_bar.set_playing(False)
+        self._reset_window_title()  # 停止播放:任务栏恢复基础标题
         self.statusBar().showMessage(tr("common.stopped"))
 
     def _show_main_window(self) -> None:
@@ -2522,6 +2907,11 @@ class MainWindow(QMainWindow):
         if self._media_keys is not None:
             try:
                 self._media_keys.stop()
+            except Exception:  # noqa: BLE001 - 退出路径不抛
+                pass
+        if self._taskbar is not None:
+            try:
+                self._taskbar.shutdown()
             except Exception:  # noqa: BLE001 - 退出路径不抛
                 pass
         if self.engine is not None:
