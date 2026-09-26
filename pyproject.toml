@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neriplayer-win"
-version = "0.7.2"
+version = "0.7.3"
 description = "NeriPlayer Windows 桌面客户端:网易云 + B站,扫码登录 / 歌单 / 播放"
 readme = "README.md"
 requires-python = ">=3.10"

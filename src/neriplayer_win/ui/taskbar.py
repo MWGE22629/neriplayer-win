@@ -2,22 +2,27 @@
 
 鼠标悬停任务栏图标弹出的窗口预览框(Aero Peek)自带一条小工具栏,
 经 ITaskbarList3::ThumbBarAddButtons 注册(最多 7 个按钮);点击不经过
-主窗口,系统直接向窗口发 WM_COMMAND(LOORD(wParam)=按钮 id,
-HIWORD(wParam)=THBN_CLICKED),由原生过滤器接住转信号。
+主窗口,系统直接向窗口发 WM_COMMAND(LOWORD(wParam)=按钮 id,
+HIWORD(wParam)=THBN_CLICKED)。
 
 PySide6 无对应封装,按仓库「轻量优先」用 ctypes 直调 COM(不引 pywin32):
 - ole32.CLSIDFromString + CoCreateInstance 拿 ITaskbarList3,vtable 槽位
   (含 IUnknown/ITaskbarList/ITaskbarList2):Release=2 / HrInit=3 /
   ThumbBarAddButtons=15 / ThumbBarUpdateButtons=16;
-- 图标:现有 SVG 资产按系统明暗(AppsUseLightTheme)染成 QIcon,
-  经 CreateDIBSection + CreateIconIndirect 转成 HICON,进程存活期间
-  不销毁(工具栏持有图标句柄);
-- WM_COMMAND 过滤与 media_keys 同套路(QAbstractNativeEventFilter,
-  filter 由本对象持有引用防 GC)。
+- 图标:现有 SVG 资产按系统明暗(SystemUsesLightTheme,预览页随系统
+  主题)染成 QIcon,经 CreateDIBSection + CreateIconIndirect 转成 HICON,
+  进程存活期间不销毁(工具栏持有图标句柄);
+- 消息路由走 **QWidget.nativeEvent(窗口过程层)**:缩略图按钮点击是
+  Explorer 跨进程 SendMessage 直发窗口过程的,应用级
+  QAbstractNativeEventFilter 只看得到消息队列里的消息、看不到直发
+  消息(实测 PostMessage 可见 / 跨线程 SendMessage 不可见)——
+  这也是 WPF(HwndSource.AddHook)与 Chromium(HWNDMessageHandler)
+  处理 THBN_CLICKED 的同一位置。MainWindow.nativeEvent 把原始消息
+  交给 handle_native_event 解析分发。
 
 失败策略与托盘一致:非 Windows / COM 不可用 / 附加失败(窗口尚无任务栏
-按钮)一律静默降级为空操作,绝不影响主流程;attach 每次 showEvent 重试,
-成功一次即固定。
+按钮)一律静默降级为空操作,绝不影响主流程;attach 在每次 showEvent
+重试,TaskbarButtonCreated 消息(任务栏按钮就绪/重建)到达时再重试。
 """
 
 from __future__ import annotations
@@ -27,9 +32,8 @@ import ctypes.wintypes as wt
 import sys
 import winreg
 
-from PySide6.QtCore import QAbstractNativeEventFilter, QObject, QSize, Signal
+from PySide6.QtCore import QObject, QSize, Signal
 from PySide6.QtGui import QColor, QIcon, QImage
-from PySide6.QtWidgets import QApplication
 
 from ..i18n import tr
 from .icons import tinted_icon_with_color
@@ -199,43 +203,6 @@ def _hicon_from_icon(icon: QIcon, size: int) -> int | None:
         gdi32.DeleteObject(color)
 
 
-class _ThumbBarFilter(QAbstractNativeEventFilter):
-    """接 WM_COMMAND(按钮点击)与 TaskbarButtonCreated(任务栏按钮就绪)。
-
-    任务栏按钮就绪消息只在按钮真正建立时送达一次,晚于首次 showEvent,
-    这是附加失败后自动重试的主路径;不吞掉该消息,Qt 侧无感。
-    """
-
-    def __init__(self, owner: "TaskbarThumbBar") -> None:
-        super().__init__()
-        self._owner = owner
-
-    def nativeEventFilter(self, eventType, message):  # noqa: N802 - Qt 命名
-        try:
-            if bytes(eventType) != b"windows_generic_MSG":
-                return False, 0
-            msg = _MSG.from_address(int(message))
-            if (
-                self._owner._created_msg
-                and msg.message == self._owner._created_msg
-                and int(msg.hwnd or 0) == self._owner._watch_hwnd
-            ):
-                self._owner._on_taskbar_created()
-                return False, 0
-            if msg.message != WM_COMMAND:
-                return False, 0
-            if int(msg.hwnd or 0) != self._owner.hwnd:
-                return False, 0
-            if ((msg.wParam >> 16) & 0xFFFF) != _THBN_CLICKED:
-                return False, 0
-            command_id = msg.wParam & 0xFFFF
-            if self._owner._dispatch(command_id):
-                return True, 0
-            return False, 0
-        except Exception:  # noqa: BLE001 - 原生过滤内绝不抛
-            return False, 0
-
-
 class TaskbarThumbBar(QObject):
     """任务栏缩略图工具栏控制器;按钮点击以信号交给 MainWindow 执行。"""
 
@@ -256,16 +223,41 @@ class TaskbarThumbBar(QObject):
         self._add_buttons = None
         self._update_buttons = None
         self._release = None
-        self._filter: _ThumbBarFilter | None = None
         if sys.platform == "win32":
             self._created_msg = ctypes.windll.user32.RegisterWindowMessageW(
                 "TaskbarButtonCreated"
             )
             self._init_com()
-            self._filter = _ThumbBarFilter(self)
-            app = QApplication.instance()
-            if app is not None:
-                app.installNativeEventFilter(self._filter)
+
+    def handle_native_event(self, event_type, message) -> bool:
+        """窗口过程层消息入口(MainWindow.nativeEvent 转发原始参数)。
+
+        处理两类消息:
+        - TaskbarButtonCreated(任务栏按钮就绪/重建):触发附加重试,
+          不吞消息;
+        - WM_COMMAND + THBN_CLICKED + 已知按钮 id:分发为信号并吞掉。
+
+        返回 True 表示消息已消费(nativeEvent 应短路 Qt 默认处理)。
+        解析失败/非目标消息一律返回 False,绝不抛出。
+        """
+        try:
+            if bytes(event_type) != b"windows_generic_MSG":
+                return False
+            msg = _MSG.from_address(int(message))
+            if (
+                self._created_msg
+                and msg.message == self._created_msg
+                and int(msg.hwnd or 0) == self._watch_hwnd
+            ):
+                self._on_taskbar_created()
+                return False  # 让 Qt 继续处理
+            if msg.message != WM_COMMAND or int(msg.hwnd or 0) != self._hwnd:
+                return False
+            if ((msg.wParam >> 16) & 0xFFFF) != _THBN_CLICKED:
+                return False
+            return self._dispatch(msg.wParam & 0xFFFF)
+        except Exception:  # noqa: BLE001 - 窗口过程内绝不抛
+            return False
 
     # -- 属性 ----------------------------------------------------------------
 
@@ -439,15 +431,7 @@ class TaskbarThumbBar(QObject):
     # -- 清理 ----------------------------------------------------------------
 
     def shutdown(self) -> None:
-        """退出清理:卸过滤器、销毁图标、Release COM;窗口销毁时工具栏随之消失。"""
-        if self._filter is not None:
-            app = QApplication.instance()
-            if app is not None:
-                try:
-                    app.removeNativeEventFilter(self._filter)
-                except Exception:  # noqa: BLE001
-                    pass
-            self._filter = None
+        """退出清理:销毁图标、Release COM;窗口销毁时工具栏随之消失。"""
         user32 = ctypes.windll.user32
         for hicon in self._icons.values():
             user32.DestroyIcon(hicon)

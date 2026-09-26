@@ -151,6 +151,13 @@ Windows 桌面音乐播放器,自用优先:网易云 + B站两个音源,
       任务栏;③ 图标配色误读 AppsUseLightTheme,预览页实随
       SystemUsesLightTheme(混搭主题下白上白/黑上黑不可见)——改读
       系统主题键;④ HICON 像素回读回归,防全透明隐形图标;回归 +4 例)
+      (2026-09-26 修复点击无效(v0.7.3):按钮点击是 Explorer 跨进程
+      SendMessage 直发窗口过程,应用级 native event filter 只看得到
+      消息队列消息、看不到直发消息(实测 PostMessage 可见/跨线程
+      SendMessage 不可见)——消息处理整体移到 MainWindow.nativeEvent
+      窗口过程层(与 WPF AddHook/Chromium HWNDMessageHandler 同位),
+      应用级过滤器删除;真机跨线程 SendMessage 端到端验证三键分发
+      与动作链路,回归 41 例)
 
 - [x] 动效打磨(借鉴 Android 端参数体系:FastOutSlowIn、进 220-300ms /
       出 120-250ms、缩放淡入过渡、防闪延迟):

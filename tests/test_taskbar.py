@@ -54,10 +54,9 @@ class TestThumbBarDispatch:
             bar.next_requested.connect(lambda: fired.append("next"))
             for command_id in (_ID_PREV, _ID_PLAY_PAUSE, _ID_NEXT):
                 msg = _make_command(_HOUSE, command_id)
-                consumed, _ = bar._filter.nativeEventFilter(
+                assert bar.handle_native_event(
                     b"windows_generic_MSG", ctypes.addressof(msg)
-                )
-                assert consumed is True
+                ) is True
             assert fired == ["prev", "pp", "next"]
         finally:
             bar.shutdown()
@@ -66,10 +65,9 @@ class TestThumbBarDispatch:
         bar = _make_bar()
         try:
             msg = _make_command(_HOUSE, 0x9001)
-            consumed, _ = bar._filter.nativeEventFilter(
+            assert bar.handle_native_event(
                 b"windows_generic_MSG", ctypes.addressof(msg)
-            )
-            assert consumed is False
+            ) is False
         finally:
             bar.shutdown()
 
@@ -79,10 +77,9 @@ class TestThumbBarDispatch:
             fired: list[str] = []
             bar.next_requested.connect(lambda: fired.append("next"))
             msg = _make_command(_HOUSE + 1, _ID_NEXT)
-            consumed, _ = bar._filter.nativeEventFilter(
+            assert bar.handle_native_event(
                 b"windows_generic_MSG", ctypes.addressof(msg)
-            )
-            assert consumed is False
+            ) is False
             assert fired == []
         finally:
             bar.shutdown()
@@ -94,11 +91,18 @@ class TestThumbBarDispatch:
             fired: list[str] = []
             bar.play_pause_requested.connect(lambda: fired.append("pp"))
             msg = _make_command(_HOUSE, _ID_PLAY_PAUSE, hiword=0)
-            consumed, _ = bar._filter.nativeEventFilter(
+            assert bar.handle_native_event(
                 b"windows_generic_MSG", ctypes.addressof(msg)
-            )
-            assert consumed is False
+            ) is False
             assert fired == []
+        finally:
+            bar.shutdown()
+
+    def test_wrong_event_type_ignored(self):
+        bar = _make_bar()
+        try:
+            msg = _make_command(_HOUSE, _ID_PLAY_PAUSE)
+            assert bar.handle_native_event(b"macos_generic_EVENT", 0) is False
         finally:
             bar.shutdown()
 
@@ -133,9 +137,7 @@ class TestThumbBarReattach:
             msg.message = bar._created_msg
             msg.wParam = 0
             msg.lParam = 0
-            bar._filter.nativeEventFilter(
-                b"windows_generic_MSG", ctypes.addressof(msg)
-            )
+            bar.handle_native_event(b"windows_generic_MSG", ctypes.addressof(msg))
             # 消息触发重挂:又调了一次 Add(无论成功与否都恢复可用状态)
             assert len(calls) == 1
             assert bar.attached is True

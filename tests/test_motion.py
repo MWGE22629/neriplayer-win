@@ -522,3 +522,43 @@ class TestTaskbarWiring:
             qapp.processEvents()
         finally:
             _close(window)
+
+    def test_native_event_routes_thumbbar_commands(self, qapp, monkeypatch, tmp_path):
+        """窗口过程层分发:MainWindow.nativeEvent 必须把缩略图按钮的
+        WM_COMMAND 转成任务栏按钮信号(跨进程 SendMessage 直发路径,
+        应用级过滤器接不到,回归根因见 2026-09-26 修复)。"""
+        import ctypes
+
+        from neriplayer_win.ui.media_keys import _MSG
+        from neriplayer_win.ui.taskbar import _THBN_CLICKED, WM_COMMAND
+
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            bar = window._taskbar
+            assert bar is not None
+            bar._hwnd = int(window.winId())
+            fired: list[str] = []
+            bar.play_pause_requested.connect(lambda: fired.append("pp"))
+            bar.prev_requested.connect(lambda: fired.append("prev"))
+            msg = _MSG()
+            msg.hwnd = bar._hwnd
+            msg.message = WM_COMMAND
+            msg.wParam = (_THBN_CLICKED << 16) | 0x8002
+            msg.lParam = 0
+            consumed, _result = window.nativeEvent(
+                b"windows_generic_MSG", ctypes.addressof(msg)
+            )
+            assert consumed is True
+            assert fired == ["pp"]
+            # 非目标消息原样放行,不影响 Qt 默认处理
+            other = _MSG()
+            other.hwnd = bar._hwnd
+            other.message = 0x0005  # WM_SIZE
+            other.wParam = 0
+            other.lParam = 0
+            consumed2, _ = window.nativeEvent(
+                b"windows_generic_MSG", ctypes.addressof(other)
+            )
+            assert consumed2 is False
+        finally:
+            _close(window)

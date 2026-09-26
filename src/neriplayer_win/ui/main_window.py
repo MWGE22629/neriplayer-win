@@ -2861,6 +2861,22 @@ class MainWindow(QMainWindow):
         if self._taskbar is not None:
             self._taskbar.attach(int(self.winId()))
 
+    def nativeEvent(self, eventType, message):  # noqa: N802 - Qt 命名
+        """窗口过程层消息分发:任务栏缩略图按钮点击等原生消息。
+
+        缩略图按钮的 WM_COMMAND 是 Explorer 跨进程 SendMessage 直发
+        窗口过程的,应用级 native event filter 看不到(实测),必须在
+        这里接;返回 True 短路 Qt 默认处理。未命中返回 (False, 0),
+        与基类默认等价(PySide6 基类不支持从 Python 侧合成参数直调)。
+        """
+        if self._taskbar is not None:
+            try:
+                if self._taskbar.handle_native_event(eventType, message):
+                    return True, 0
+            except Exception:  # noqa: BLE001 - 窗口过程内绝不抛
+                pass
+        return False, 0
+
     def _on_media_stop(self) -> None:
         if self.engine is not None:
             self.engine.stop()
