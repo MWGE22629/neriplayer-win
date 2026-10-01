@@ -89,10 +89,12 @@ from ..data.store import (
     apply_stored_order,
 )
 from ..i18n import tr
+from ..log import get_logger
 from ..player.engine import PlayerEngine, PlayerEngineError
 from ..player.queue import BackupUrlRotator, PlayMode, PlayQueue, QueueSong
 from . import theme
 from . import cover_seed
+from .audio_route import AudioRouteGuard
 from .browser_login import BrowserLoginDialog, bili_web_login
 from .covers import CoverLoader
 from .icons import app_icon, tinted_icon, tinted_icon_with_color, tray_icon
@@ -113,6 +115,8 @@ _PAGE_TABLE = 1
 _PAGE_SETTINGS = 2
 
 # 基础窗口标题(品牌名,不随语言变):任务栏歌名显示的宽度基准
+logger = get_logger("main_window")
+
 _TITLE_BASE = "NeriPlayer Win"
 
 # 补齐用空白字符:Win11 任务栏文本层(XAML/DirectWrite)会折叠尾随
@@ -1005,6 +1009,7 @@ class MainWindow(QMainWindow):
         self._tray_hint_shown = False
         self._force_exit = False
         self._media_keys: MediaKeyHandler | None = None
+        self._route_guard: AudioRouteGuard | None = None
         self.themes = ThemeManager()
         self.themes.theme_changed.connect(self._on_theme_changed)
         self.themes.apply(self._settings.get(SETTING_APPEARANCE, "dark"))
@@ -1040,6 +1045,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(app_icon())
         self._setup_tray(tray_icon(self.themes.name))
         self._setup_media_keys()
+        self._setup_route_guard()
         self._setup_taskbar()
 
         self._rebuild_sidebar()
@@ -2329,6 +2335,9 @@ class MainWindow(QMainWindow):
         self._update_playing_row()  # 新起播:均衡器条移到新行
         self._play_fail_count = 0  # 成功发起播放:连续失败计数复位
         self._set_play_controls_active(True)
+        if self._route_guard is not None:
+            # 用户选歌(含自动接播)即用户意图:清除路由暂停的自动恢复态
+            self._route_guard.notify_user_action()
         self._apply_song_window_title()  # 任务栏文案换为歌名(等宽规范)
         self.statusBar().showMessage(
             status or tr("play.playing", title=song.title, quality="")
@@ -2776,6 +2785,8 @@ class MainWindow(QMainWindow):
         if self._taskbar is not None:
             self._taskbar.set_playing(playing)
         self._eq_set_active(playing)
+        if self._route_guard is not None:
+            self._route_guard.set_playing(playing)
 
     def _wire_player_bar(self) -> None:
         bar = self.player_bar
@@ -2788,6 +2799,9 @@ class MainWindow(QMainWindow):
         bar.queue_clicked.connect(self._open_queue_window)
 
     def _toggle_pause(self) -> None:
+        if self._route_guard is not None:
+            # 手动播放/暂停:撤销「切回耳机自动恢复」意图,用户说了算
+            self._route_guard.notify_user_action()
         if self.engine is not None:
             self.engine.toggle_pause()
 
@@ -2838,6 +2852,54 @@ class MainWindow(QMainWindow):
         keys.next_requested.connect(self._play_next)
         keys.prev_requested.connect(self._play_prev)
 
+    # -- 音频路由:耳机断开自动暂停/切回恢复 ------------------------------------
+
+    def _setup_route_guard(self) -> None:
+        """默认输出设备监视(增强能力,失败静默降级为无自动暂停)。
+
+        对照 Android PlayerManager:路由离开耳机类 → 暂停(蓝牙短确认
+        防抖),回到耳机类 → 恢复;用户手动操作撤销自动恢复意图。
+        常开能力,不设开关。
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            self._route_guard = AudioRouteGuard(self)
+            self._route_guard.start()
+        except Exception:  # noqa: BLE001 - 路由监视属增强能力,绝不崩启动
+            logger.exception("音频路由守卫初始化失败")
+            self._route_guard = None
+            return
+        guard = self._route_guard
+        guard.pause_requested.connect(self._on_route_pause)
+        guard.resume_requested.connect(self._on_route_resume)
+
+    def _on_route_pause(self, reason: str) -> None:
+        """路由丢失(耳机断开/设备切离):暂停并提示。"""
+        guard = self._route_guard
+        if guard is None:
+            return
+        if self.engine is None or not self.engine.has_media:
+            return
+        if not self.engine.is_playing():
+            return
+        logger.info("音频路由丢失,自动暂停: %s", reason)
+        self.engine.set_paused(True)
+        self.statusBar().showMessage(tr("route.paused"))
+
+    def _on_route_resume(self, reason: str) -> None:
+        """路由回到耳机类设备:恢复因路由暂停的播放。"""
+        guard = self._route_guard
+        if guard is None:
+            return
+        if self.engine is None or not self.engine.is_paused():
+            # 只解除「因路由而设的暂停」;播完转 idle/已停/用户已操作时
+            # 不动 mpv(set_paused(False) 会发多余的 playing_changed)
+            return
+        logger.info("音频路由切回耳机,恢复播放: %s", reason)
+        self.engine.set_paused(False)
+        self.statusBar().showMessage(tr("route.resumed"))
+
     def _setup_taskbar(self) -> None:
         """任务栏缩略图工具栏(增强能力,失败静默降级为空操作)。
 
@@ -2878,6 +2940,8 @@ class MainWindow(QMainWindow):
         return False, 0
 
     def _on_media_stop(self) -> None:
+        if self._route_guard is not None:
+            self._route_guard.notify_user_action()
         if self.engine is not None:
             self.engine.stop()
         self.player_bar.set_playing(False)
@@ -2923,6 +2987,11 @@ class MainWindow(QMainWindow):
         if self._media_keys is not None:
             try:
                 self._media_keys.stop()
+            except Exception:  # noqa: BLE001 - 退出路径不抛
+                pass
+        if self._route_guard is not None:
+            try:
+                self._route_guard.stop()
             except Exception:  # noqa: BLE001 - 退出路径不抛
                 pass
         if self._taskbar is not None:

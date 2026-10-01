@@ -10,16 +10,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from PySide6.QtCore import QBuffer, Qt
 from PySide6.QtGui import QColor, QImage
 
 from neriplayer_win.player.queue import QueueSong
 from neriplayer_win.ui import covers as covers_module
-from neriplayer_win.ui.covers import CoverLoader
+from neriplayer_win.ui.covers import CoverLoader, schedule_disk_cache_trim, trim_disk_cache
 from neriplayer_win.ui.main_window import MainWindow
 
 
@@ -172,6 +176,85 @@ class TestMemoryCache:
         _wait_until(lambda: len(received) == 1)
         assert len(calls) == 1  # 只下载过一次
         assert received == ["http://img/y"]  # 内存命中仍正常投递
+
+
+# ---------------------------------------------------------------------------
+# 磁盘缓存 LRU 定量清理(32MiB 预算,超限删最旧)
+# ---------------------------------------------------------------------------
+
+
+def _cache_file(cache_dir: Path, url: str, data: bytes, mtime: float) -> Path:
+    """造一个封面缓存文件(sha1 命名 + 指定 mtime),返回路径。"""
+    path = cache_dir / hashlib.sha1(url.encode()).hexdigest()
+    path.write_bytes(data)
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+class TestDiskCacheTrim:
+    def _dir(self, tmp_path) -> Path:
+        cache_dir = tmp_path / "covers"
+        cache_dir.mkdir()
+        return cache_dir
+
+    def test_under_budget_is_noop(self, tmp_path):
+        cache_dir = self._dir(tmp_path)
+        for i in range(3):
+            _cache_file(cache_dir, f"http://img/{i}", b"x" * 10, 1000.0 + i)
+        assert trim_disk_cache(cache_dir) == (0, 0)
+        assert len(list(cache_dir.iterdir())) == 3
+
+    def test_over_budget_deletes_oldest_first(self, tmp_path):
+        cache_dir = self._dir(tmp_path)
+        # 5 个 10B 文件共 50B,预算 25B → 从旧到新删 3 个(剩 20B ≤ 25B)
+        for i in range(5):
+            _cache_file(cache_dir, f"http://img/{i}", b"x" * 10, 1000.0 + i)
+        deleted, freed = trim_disk_cache(cache_dir, max_bytes=25)
+        assert (deleted, freed) == (3, 30)
+        survivors = {path.name for path in cache_dir.iterdir()}
+        newest = {
+            hashlib.sha1(f"http://img/{i}".encode()).hexdigest() for i in (3, 4)
+        }
+        assert survivors == newest, "应只保留 mtime 最新的两个"
+
+    def test_non_cache_files_not_counted_nor_deleted(self, tmp_path):
+        cache_dir = self._dir(tmp_path)
+        _cache_file(cache_dir, "http://img/0", b"x" * 10, 1000.0)
+        # 落盘残渣与无关文件:不进账、也不删
+        (cache_dir / "abc123.tmp").write_bytes(b"x" * (1024 * 1024))
+        (cache_dir / "readme.txt").write_bytes(b"x" * (1024 * 1024))
+        assert trim_disk_cache(cache_dir, max_bytes=5) == (1, 10)
+        assert (cache_dir / "abc123.tmp").exists()
+        assert (cache_dir / "readme.txt").exists()
+
+    def test_empty_or_missing_directory(self, tmp_path):
+        assert trim_disk_cache(tmp_path / "nope") == (0, 0)  # 目录不存在
+        empty = self._dir(tmp_path)
+        assert trim_disk_cache(empty) == (0, 0)
+
+    def test_disk_hit_touches_mtime(self, qapp, monkeypatch, tmp_path):
+        monkeypatch.setenv("NERIPLAYER_WIN_DATA_DIR", str(tmp_path))
+        loader = CoverLoader()
+        old = 1_000_000.0
+        path = _cache_file(loader._cache_dir, "http://img/hot", b"png!", old)
+        monkeypatch.setattr(
+            covers_module.httpx,
+            "get",
+            lambda *a, **k: pytest.fail("磁盘命中不应发网络请求"),
+        )
+        assert loader._load_sync("http://img/hot") == b"png!"
+        assert path.stat().st_mtime > old, "命中后应 touch 刷新 mtime(LRU 标记)"
+
+    def test_schedule_runs_trim_in_background(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("NERIPLAYER_WIN_DATA_DIR", str(tmp_path))
+        cache_dir = tmp_path / "covers"
+        cache_dir.mkdir()
+        _cache_file(cache_dir, "http://img/0", b"x" * 10, 1000.0)
+        thread = schedule_disk_cache_trim()
+        thread.join(timeout=10)
+        assert not thread.is_alive(), "清理线程应已结束"
+        # 预算内:文件仍在(schedule 只是异步壳,语义同 trim_disk_cache)
+        assert len(list(cache_dir.iterdir())) == 1
 
 
 # ---------------------------------------------------------------------------

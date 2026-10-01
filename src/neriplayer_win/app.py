@@ -17,6 +17,7 @@ if sys.platform == "win32":
 from PySide6.QtCore import QLoggingCategory
 from PySide6.QtWidgets import QApplication
 
+from .ui.covers import schedule_disk_cache_trim
 from .ui.icons import app_icon
 from .ui.main_window import MainWindow
 
@@ -57,6 +58,7 @@ def main() -> int:
     app.setOrganizationName("NeriPlayer Win")
     app.setWindowIcon(app_icon())  # 全部窗口/托盘默认图标(M4)
     _boost_process_priority()  # M5:后台播放场景改善切歌与 UI 响应
+    schedule_disk_cache_trim()  # 封面磁盘缓存 LRU 定量清理(32MiB,后台)
     window = MainWindow()
     window.show()
     return app.exec()

@@ -166,6 +166,10 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "play.failed_song": ("播放失败:{title}:{message}",
                          "Playback failed: {title}: {message}"),
     "play.failed_title": ("播放失败", "Playback failed"),
+    "route.paused": ("播放设备已切换,自动暂停",
+                     "Audio device changed · paused automatically"),
+    "route.resumed": ("播放设备已切回耳机,继续播放",
+                      "Headphones reconnected · resuming playback"),
     "play.failed_auto_skip": (
         "播放失败:{title}({message}),即将自动跳到下一首…",
         "Playback failed: {title} ({message}). Skipping to next…",

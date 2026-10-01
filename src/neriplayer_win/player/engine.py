@@ -253,11 +253,31 @@ class PlayerEngine(QObject):
 
     # -- 状态查询 ------------------------------------------------------------
 
+    @property
+    def has_media(self) -> bool:
+        """是否载入过曲目(play_url 后为 True,stop/播完复位前保持)。
+
+        供音频路由守卫判断「暂停中可恢复」:暂停态 is_playing() 恒为
+        False,需要单独的媒体在位信号。
+        """
+        return self._has_media
+
     def is_playing(self) -> bool:
         if not self._has_media:
             return False
         try:
             return not bool(self._player.pause) and not bool(self._player.idle_active)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def is_paused(self) -> bool:
+        """mpv 是否处于显式暂停态(恢复播放的前置判定)。
+
+        区别于 not is_playing():播完转 idle 时 pause 已被 mpv 复位,
+        此时误发 set_paused(False) 会发出多余的 playing_changed(True)。
+        """
+        try:
+            return bool(self._player.pause) and self._has_media
         except Exception:  # noqa: BLE001
             return False
 
