@@ -19,8 +19,6 @@ from dataclasses import dataclass
 from typing import Callable
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
-from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -29,8 +27,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..api.netease.yd import NeteaseCdnFallbackInterceptor
 from ..i18n import tr
+
+# 注意:QtWebEngineCore/Widgets 与 api.netease.yd 的 import 全部延迟到
+# BrowserLoginDialog.__init__/拦截器工厂内——模块级 import 会让主窗口
+# 启动链(main_window → login_page → 本模块)每次都加载 195MB 的
+# qt6webenginecore.dll,登录弹窗才是它唯一的消费方(见 docs/PERF.md v0.8.1)。
 
 _DESKTOP_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -61,6 +63,13 @@ class WebLoginConfig:
     ) = None  # 持引用防 GC;None 表示不需要 CDN 重写
 
 
+def _netease_cdn_interceptor(parent: QObject) -> object:
+    """网易云登录页 CDN 重写拦截器;现造现加载 yd(含 WebEngine)。"""
+    from ..api.netease.yd import NeteaseCdnFallbackInterceptor
+
+    return NeteaseCdnFallbackInterceptor(parent)
+
+
 def netease_web_login() -> WebLoginConfig:
     """网易云网页登录配置(弹窗时现造,标题/提示随当前语言)。"""
     return WebLoginConfig(
@@ -70,7 +79,7 @@ def netease_web_login() -> WebLoginConfig:
         cookie_host_suffix="163.com",
         hint=tr("weblogin.netease.hint"),
         user_agent=_DESKTOP_UA,
-        interceptor_factory=lambda parent: NeteaseCdnFallbackInterceptor(parent),
+        interceptor_factory=_netease_cdn_interceptor,
     )
 
 
@@ -94,6 +103,11 @@ class BrowserLoginDialog(QDialog):
 
     def __init__(self, config: WebLoginConfig, parent=None) -> None:
         super().__init__(parent)
+        # WebEngine 按需加载:import 本身会加载 qt6webenginecore.dll,
+        # 只有真的要开登录窗时才付这笔钱(常态启动零成本)
+        from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+
         self._config = config
         self.setWindowTitle(config.title)
         self.resize(1120, 780)

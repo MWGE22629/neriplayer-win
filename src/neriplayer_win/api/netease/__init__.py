@@ -37,7 +37,17 @@ from .models import (
     QrLoginCheckResult,
     QrLoginSession,
 )
-from .yd import YdTokenFetcher
+
+# YdTokenFetcher(来自 .yd)拖挂 QtWebEngineCore(195MB DLL),只在网页
+# 登录时才需要;模块级 import 会让每次启动都加载它(见 docs/PERF.md
+# v0.8.1)。改为 PEP 562 惰性导出:`from ... import YdTokenFetcher`
+# 依旧可用,只是首次取属性时才真正加载 yd。
+def __getattr__(name: str):
+    if name == "YdTokenFetcher":
+        from .yd import YdTokenFetcher
+
+        return YdTokenFetcher
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "DEFAULT_QUALITY",

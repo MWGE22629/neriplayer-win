@@ -16,4 +16,4 @@ if sys.platform == "win32":
     except OSError:
         pass
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"

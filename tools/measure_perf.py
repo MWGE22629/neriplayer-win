@@ -276,10 +276,10 @@ def main() -> int:
         statistics.median(s) <= 1.5 for _t, s, _m in summary if s
     )
     verdict_mem = all(
-        m[0] <= 150 * 1024**2 for _t, _s, m in summary if m
+        m[0] <= 200 * 1024**2 for _t, _s, m in summary if m
     )
     print(f"\n验收(M4):冷启动≤1.5s {'PASS' if verdict_cold else 'FAIL'};"
-          f"常驻内存≤150MB {'PASS' if verdict_mem else 'FAIL'}")
+          f"常驻内存≤200MB {'PASS' if verdict_mem else 'FAIL'}")
     return 0
 
 

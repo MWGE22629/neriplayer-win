@@ -28,6 +28,20 @@ _ROOT_NAME = "neriplayer"
 _MAX_BYTES = 1 * 1024 * 1024
 _BACKUP_COUNT = 3
 
+
+def _os_summary() -> str:
+    """启动头的 OS 描述;Windows 上绝不用 platform.platform()。
+
+    Python 3.12 起 platform.platform() 在 Windows 走 _wmi 查询系统信息,
+    本机实测单次 300-500ms,曾是启动最大单项(见 docs/PERF.md v0.8.1);
+    getwindowsversion 是 RtlGetVersion 的薄包装,微秒级。
+    """
+    try:
+        version = sys.getwindowsversion()
+        return f"Windows-{version.major}.{version.minor}.{version.build}"
+    except AttributeError:  # 非 Windows:uname 走 uname(3),无 WMI 问题
+        return platform.platform()
+
 # setup 状态:getLogger 侧无须感知,setup 幂等与 handler 复挂靠这两项防守
 _setup_done = False
 _handler: RotatingFileHandler | None = None
@@ -69,7 +83,7 @@ def setup_logging() -> None:
         logger = get_logger("app")
         logger.info(
             "启动 NeriPlayer Win v%s python=%s platform=%s",
-            __version__, sys.version.split()[0], platform.platform(),
+            __version__, sys.version.split()[0], _os_summary(),
         )
         logger.info("环境代理快照 getproxies()=%r", dict(getproxies()))
     except Exception:  # noqa: BLE001 - 日志失败绝不影响启动

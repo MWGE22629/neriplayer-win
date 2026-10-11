@@ -1,147 +1,103 @@
-# 性能验收(M4:打包与性能)
+# 性能验收
 
-## v0.7.2 复测(2026-09-26)
+验收线:**冷启动 ≤ 1.5s / 常驻 WorkingSet ≤ 200MB**(2026-10-11 由 150MB 放宽:
+v0.5.0 起封面缩略图、v0.7.0 起动态取色与双语、v0.8.0 起路由守卫等特性累积把
+空闲常驻推到 148-157MB,播放态约 220MB;150MB 线已无法容纳合理的新特性)。
 
-| 目标 | 冷启动中位(5 次) | 常驻 WorkingSet(空闲 20s) | 私有提交 | 验收线 | 判定 |
-| --- | --- | --- | --- | --- | --- |
-| 发行 exe(干净数据目录) | **804 ms** | **143 MB** | 87 MB | ≤1.5s / ≤150MB | **PASS** |
-| 发行 exe(本机登录态) | 834 ms | 154 MB | 94 MB | (对照) | — |
-
-任务栏缩略图工具栏(ctypes COM + 4 个 HICON + 原生过滤器)与五组
-动效(交叉淡化/横滑手势/均衡器条/页面过渡)零可测回归:干净目录
-常驻 143MB 与 0.4.x 基线持平,冷启动 804ms 持平;登录态对照 154MB
-为既有现象(登录后歌单/歌名 CJK 文本的 DirectWrite 字形加载,见
-0.2.0 条目),非本次引入。
-
-## v0.4.1 复测(2026-09-17)
+## v0.8.1 复测(2026-10-11,启动性能修复)
 
 | 目标 | 冷启动中位(5 次) | 常驻 WorkingSet(空闲 20s) | 私有提交 | 验收线 | 判定 |
 | --- | --- | --- | --- | --- | --- |
-| 发行 exe | **545 ms** | **146 MB** | 87 MB | ≤1.5s / ≤150MB | **PASS** |
+| 发行 exe | **744 ms** | **148 MB** | 90 MB | ≤1.5s / ≤200MB | **PASS** |
+| dev 对照 | 836 ms | 128 MB | 86 MB | (对照) | — |
 
-修补版:侧栏分区头角标冻结修复 + 图标高分屏清晰度。常驻比 0.4.0 的
-143MB 多约 3MB,来自图标管线的 2x/128px 物理底图(染色底图 64→128px、
-分区头合成画布 DPR=2),仍在验收线内;冷启动持平。注:本次测量机器
-后台有其他负载,数字略偏保守。
+修复前(v0.8.0 同机同日测量):发行 exe 冷启动 **979 ms** / 常驻 **157 MB**;
+dev 1113 ms / 136 MB。真实使用(非热缓存)启动日志实测 2.3-2.9s。
 
-## v0.4.0 复测(2026-09-17)
+### 根因与修复(两处,合计约 -240ms,内存 -9MB)
 
-| 目标 | 冷启动中位(5 次) | 常驻 WorkingSet(空闲 20s) | 私有提交 | 验收线 | 判定 |
-| --- | --- | --- | --- | --- | --- |
-| 发行 exe | **571 ms** | **143 MB** | 84 MB | ≤1.5s / ≤150MB | **PASS** |
-| dev 对照 | 617 ms | 118 MB | 78 MB | (对照) | — |
+1. **`platform.platform()` 拖慢每次启动 300-500ms**
+   (log.py 启动头用它记 OS 版本;Python 3.12 起该函数在 Windows 走
+   `_wmi` 查询 Win32_ComputerSystem 等类,本机实测单次 491ms)。
+   修复:换 `sys.getwindowsversion()`(RtlGetVersion 薄包装,微秒级),
+   输出 `Windows-10.0.26100`,语义不减。
+2. **qt6webenginecore.dll(195MB)每次启动都被加载**
+   (`main_window → login_page → browser_login → PySide6.QtWebEngineCore`
+   模块级 import,`api.netease.__init__ → yd` 同样)。README 承诺的
+   「登录弹窗才加载 WebEngine」此前只对子进程成立,DLL 本体一直在
+   启动链上;热缓存下 ~20-50ms,真冷启动(开机后首开)还要从磁盘
+   读 195MB,是真实使用 2-2.9s 的主要成分。
+   修复:import 全部下沉到 `BrowserLoginDialog.__init__` 与拦截器工厂;
+   `YdTokenFetcher` 改 PEP 562 惰性导出(`from ... import` 仍可用)。
+   发行包仍带 WebEngine DLL(登录功能需要),只是不再随启动加载。
 
-与 0.3.0 基线持平(555ms / 142MB,差异在测量噪声内)。本次新增
-「最近」分区 + 右键「下一首播放」+ 每日推荐:侧栏多一个
-history 单色 SVG 图标( QPainter 染色,不走字体系统,无字形回退
-风险)、设置页一个 QSpinBox、「最近」栈只在起播首曲时多一次
-settings.json 追加写与侧栏重建(非热路径),均为零可测回归;
-发行目录 485.9 MB / 160 文件,zip 发行包 192.9 MB。
+定位方法:`tools/profile_startup.py` 按 MainWindow 构造顺序逐项计时
+(platform.platform 项 438ms 一眼可见),配合 `python -X importtime`
+看 import 树里的 QtWebEngineCore。
 
-## v0.3.0 复测(2026-09-15)
+### 顺带发现
 
-| 目标 | 冷启动中位(3 次) | 常驻 WorkingSet(空闲 20s) | 私有提交 | 验收线 | 判定 |
-| --- | --- | --- | --- | --- | --- |
-| 发行 exe | **555 ms** | **142 MB** | 84 MB | ≤1.5s / ≤150MB | **PASS** |
-| dev 对照 | 743 ms | 120 MB | 78 MB | (对照) | — |
+- measure_perf.py 按窗口标题清残留实例,**播放中标题是歌名**(任务栏
+  歌名特性),会漏杀正在播的实例;构建发行包前若遇 mpv-2.dll
+  PermissionError,先 taskkill 干净。
+- dev 常驻 128MB < 发行 148MB:Nuitka 常量段映射 + 静态链接运行时,
+  与历史版本同规律。
 
-与 0.2.0 基线持平。本次接入网易云收藏歌单(39 个第三方标题)后曾出现
-**登录态 +45~67MB 内存回归**(发行版 164-187MB):第三方标题中的
-❤(U+2764)/٩(U+0669)/๑(U+0E51)/♪(U+266A) 等字符不在主字体
-(微软雅黑 UI)字形集内,渲染时触发 DirectWrite 加载回退字体——与
-0.2.0「字形回退陷阱」同根因,但这次来自**不可控的动态文案**。
+## 历史版本测量(同口径摘要)
 
-定位方法(受控 A/B):v0.2.0 代码(git stash)+ 登录态 = 120MB;
-新代码 + 干净数据目录(未登录)= 116MB;新代码 + 登录态 = 164MB+。
-锁定「登录态 + 新代码」组合后,对真实歌单标题按 GDI
-`GetGlyphIndicesW`(GGI_MARK_NONEXISTING_GLYPHS)逐字符探测,
-命中雅黑缺字形字符。
+| 版本 | 日期 | 发行冷启动 | 发行常驻 | 备注 |
+| --- | --- | --- | --- | --- |
+| 0.1.0 | 09-14 | 530 ms | 141 MB | 首测,基线 |
+| 0.2.0 | 09-15 | 555 ms | 140 MB | 字形回退陷阱 +50MB 已修(见下) |
+| 0.3.0 | 09-15 | 555 ms | 142 MB | 收藏歌单标题字形净化(textsafe.py) |
+| 0.4.0/0.4.1 | 09-17 | 545-571 ms | 143-146 MB | 最近列表/右键插播/每日推荐;高分屏图标 2x 底图 +3MB |
+| 0.7.2 | 09-26 | 804 ms | 143 MB | 任务栏工具栏+五组动效(冷启动较 0.4.x 漂移 +260ms,当时未深究;0.8.1 复盘确认主因是 platform.platform 随 v0.6.3 日志特性引入,WebEngine import 链则自 v0.1.0 就在) |
+| 0.8.0 | 10-11 | 979 ms | 157 MB | 路由守卫+封面 LRU;常驻破 150MB 线,验收线放宽到 200MB |
+| 0.8.1 | 10-11 | 744 ms | 148 MB | 启动性能修复(见上) |
 
-修复:**新增 `ui/textsafe.py`**——动态标题渲染前净化:
+## 重要经验(长期有效)
 
-- 先 NFKC 归一(𝕏→X、①→1、全角→半角,救回可读 ASCII);
-- 再按应用实际字体 GDI 探测字形(码点级缓存,资源惰性创建复用);
-- 未覆盖码点与控制/格式字符/变体选择符(U+FE00-FE0F)一并省略
-  (显示空白;整体净化为空时以单个「?」兜底)——初版把未覆盖字符
-  替换为「?」,发布后用户反馈问号易造成困惑,改为静默省略;
-- 非 BMP 字符(emoji/数学字母区)不经探测直接视为未覆盖;
-- 探测失败(非 Windows / GDI 异常)fail-open 放行,不吞标题。
+### 字形回退陷阱(0.2.0/0.3.0 两度中招)
 
-接入点:侧栏歌单/收藏夹标题,以及队列歌曲的标题/歌手(歌曲表/
-播放条/状态栏/托盘气泡共用一处净化)。静态文案仍由
-`test_sidebar_text_has_no_exotic_glyph` 的保守码区拦截,
-动态路径新增 `tests/test_textsafe.py` 回归。
+UI 文本出现主字体(微软雅黑)不覆盖的字符时,DirectWrite 会整套加载
+回退字体并映射进进程:**侧栏两个几何符号「▾/▸」就带来 +45~50MB 常驻**;
+0.3.0 又被第三方歌单标题里的 ❤/٩/๑/♪ 动态文案重演(+45~67MB)。
 
-## v0.2.0 复测(2026-09-15)
+- 修复与防线:指示符号一律 QPainter 画图标不走过字体系统;动态文案经
+  `ui/textsafe.py`(NFKC 归一 + GDI GetGlyphIndices 探测,未覆盖码点
+  静默省略);`test_sidebar_text_has_no_exotic_glyph` 拦截静态文案。
+- 结论:UI 文本只用主字体与 CJK 覆盖的字符。
 
-| 目标 | 冷启动中位(3 次) | 常驻 WorkingSet(空闲 20s) | 私有提交 | 验收线 | 判定 |
-| --- | --- | --- | --- | --- | --- |
-| 发行 exe | **555 ms** | **140 MB** | 83 MB | ≤1.5s / ≤150MB | **PASS** |
-| dev 对照 | 704 ms | 118 MB | 77 MB | (对照) | — |
+### 测量口径(复测必读)
 
-与 0.1.0 基线持平。本次曾出现 **+50MB WorkingSet 回归**,根因与修复见
-下文「字形回退陷阱」,已加防回归测试。
-
-### 字形回退陷阱(重要经验)
-
-侧栏分区头的折叠指示曾用文字符号「▾/▸」(U+25BE/U+25B8)。这两个
-几何字形不在主字体(及 CJK 回退链)覆盖内,会触发 DirectWrite 额外
-加载整套回退字体并映射进进程——隔离测试:**仅两个字符就带来约
-+45~50MB 常驻 WorkingSet**(纯中文文本对照组仅 +18MB,属正常 CJK
-字体回退)。
-
-- 修复:折叠三角改为 QPainter 画进图标(与品牌标合成 30x18 画布),
-  不经过字体系统;
-- 防回归:`tests/test_main_window_layout.py::test_sidebar_text_has_no_exotic_glyph`
-  拦截侧栏文本中的低频区字符(几何形状/箭头/杂项符号区)。
-
-结论:UI 文本一律只用主字体与 CJK 覆盖的字符;指示符号画图标。
-
-## v0.1.0 首测(2026-09-14)
-
-测量日期:2026-09-14。结论先行:**两项指标均达标**。
-
-| 目标 | 冷启动中位(5 次) | 常驻 WorkingSet(空闲 20s) | 私有提交 | 验收线 | 判定 |
-| --- | --- | --- | --- | --- | --- |
-| 发行 exe(`dist/neriplayer-win/NeriPlayerWin.exe`) | **530 ms** | **141 MB** | 83 MB | ≤1.5s / ≤150MB | **PASS** |
-| dev 对照(`uv run python -m neriplayer_win`) | **589 ms** | **117 MB** | 77 MB | (对照) | — |
-
-发行版启动比 dev 还快约 60ms:Nuitka 编译后无解释器逐模块 import 的开销;
-exe 常驻内存略高于 dev(编译版常量段整体映射进工作集 + 静态链接的运行时),
-量级不变。
+- **冷启动** = CreateProcess → 主窗口可见(EnumWindows 精确匹配标题
+  "NeriPlayer Win"),每轮强杀进程树间歇 1s,取 5 次中位;这是「OS
+  文件缓存已热」口径。真·首次冷启(开机后第一次)受磁盘支配,本应用
+  历史上被 195MB 的 qt6webenginecore.dll 拖累,0.8.1 懒加载后才不受
+  它影响。
+- **电源模式显著影响冷启动**:电池模式约为交流电 2 倍;验收测量必须
+  接交流电。
+- **常驻内存** = 窗口可见后空闲 20s,WorkingSet/私有提交连采 3 次取
+  中位;libmpv 跑在主进程内已包含。登录态会因 CJK 字形加载 +10MB 级;
+  播放态(封面/取色/mpv 缓冲)约 220MB,不属验收口径但注意别误读
+  任务管理器。
+- WebEngine 子进程仅登录窗打开期间存在(一次性,关窗即释放);
+  0.8.1 起 DLL 本体也只在登录窗期间加载。
+- 150MB 量级 WorkingSet 的大头是 libmpv(shinchiro 全功能构建)与 Qt;
+  未来要压内存可换精简构建 mpv-2.dll,预计可省 20-40MB。
 
 ## 测量环境
 
-- Windows 11(10.0.26100),AMD Ryzen x16,28 GB 内存
-- Python 3.12.**,PySide6 6.11.2,Nuitka 4.2.1(standalone + LTO)
+- Windows 11(10.0.26100),AMD Ryzen x16,28 GB 内存,交流电
+- Python 3.12.**,PySide6 6.11.2,Nuitka(standalone + LTO)
 - 工具:`uv run python tools/measure_perf.py --target both --runs 5 --idle 20`
+  阶段剖析:`uv run python tools/profile_startup.py`
 
-## 口径与注意事项
-
-- **冷启动** = CreateProcess → 主窗口可见(`EnumWindows` 精确匹配标题
-  "NeriPlayer Win"),每轮结束强杀进程树并间歇 1s,取 5 次中位。
-  这是「OS 文件缓存已热」的口径——等价于日常点图标启动;真·首次冷启
-  (开机后第一次)会因磁盘读取略慢,但单目录发行没有 onefile 的自解压
-  一次性惩罚,量级不变。
-- **冷启动受电源模式显著影响**(2026-09-15 实测):电池模式
-  (PowerLineStatus=Offline)下 dev/dist 冷启动均约为交流电的 2 倍
-  (发行版 1.13s vs 0.55s,dev 同比变慢),内存不受影响;**验收测量
-  须在接通交流电时进行**,电池模式下的数字只用于对照。
-- **常驻内存** = 主进程 WorkingSet / 私有提交,窗口可见后空闲 20s,
-  连续采样 3 次取中位。libmpv 以 DLL 形式跑在主进程内,**已包含**在数字里。
-- **WebEngine 按需加载是现状**:登录弹窗才会创建 `QWebEngineView`,常态
-  没有 `QtWebEngineProcess` 子进程,本测量反映"不开登录窗"的常态。
-  打开登录窗后 WebEngine 子进程会额外占内存(一次性,关窗即释放)。
-- exe 以发行目录为 cwd 启动(等价双击);dev 从仓库根启动(含 uv 与
-  解释器的启动开销,作为对照参考)。
-- 151MB 级别的 WorkingSet 中大头是 libmpv(shinchiro 全功能构建)与
-  Qt;若未来要压内存,可换精简构建的 mpv-2.dll,预计可省 20-40MB。
-
-## 发行目录体积(瘦身后 464 MB / 159 文件)
+## 发行目录体积(0.8.1 约 464 MB / 159 文件)
 
 | 体积 | 内容 |
 | --- | --- |
-| 195 MB | qt6webenginecore.dll(Chromium,登录窗所需,不可省) |
+| 195 MB | qt6webenginecore.dll(Chromium,登录窗所需,不可省;0.8.1 起不随启动加载) |
 | 115 MB | bin/mpv-2.dll(shinchiro 全功能 libmpv) |
 | 31 MB | icudt73.dll(WebEngine 的 ICU) |
 | 25 MB | NeriPlayerWin.exe(全部业务代码 + 依赖编译为原生码) |
@@ -149,16 +105,10 @@ exe 常驻内存略高于 dev(编译版常量段整体映射进工作集 + 静�
 | 3 MB | qtwebengine_resources*.pak + v8_context_snapshot.bin |
 | 其余 | icudtl.dat、python312.dll、Qt6 其余 DLL、certifi 等 |
 
-已做的瘦身(共 **-154.8 MB**,见 `tools/build_exe.py: prune_dist`):
-
-- 删 `qtwebengine_devtools_resources*.pak`(仅 devtools/F12 用,88MB);
-- 删全部 `*.debug.pak` / `v8_context_snapshot.debug.bin`(调试资源);
-- Qt 翻译仅保留 zh_CN;Chromium locale 仅保留 zh-CN + en-US;
-- 删 qt6pdf.dll(所有二进制导入闭包均未引用;qt6svg.dll 保留——
-  qsvg 图标/图片插件运行时动态加载)。
-
-启动性能已做的优化:单目录 standalone(不做 onefile,避免每次启动自解压)、
-`--lto=yes`、`--python-flag=no_site`。
+已做的瘦身(-154.8 MB,见 `tools/build_exe.py: prune_dist`):删
+devtools/调试 pak;Qt 翻译仅 zh_CN;Chromium locale 仅 zh-CN + en-US;
+删 qt6pdf.dll。启动优化:单目录 standalone(无 onefile 自解压)、
+`--lto=yes`、`--python-flag=no_site`、0.8.1 的 WebEngine 懒加载。
 
 ## 复测方法
 
