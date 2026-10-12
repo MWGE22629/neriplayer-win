@@ -1,5 +1,11 @@
 """NeriPlayer Win:网易云 + B站的 Windows 桌面音乐播放器。"""
 
+# 启动桩锚点:本包首行代码时刻。必须先于下方 ICU 预加载等一切重活
+# (bootstamp 顶层只 import time,成本可忽略;ctypes 惰性加载)。
+from .bootstamp import mark_first_python
+
+mark_first_python()
+
 import os
 import sys
 

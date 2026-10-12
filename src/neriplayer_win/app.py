@@ -50,15 +50,19 @@ def _boost_process_priority() -> None:
 
 
 def main() -> int:
+    from .bootstamp import report
     from .log import setup_logging
 
     setup_logging()  # 尽早:后续启动阶段的问题也要能落盘
+    report("setup后")  # 启动桩:此前 = loader + import 链(见 bootstamp.py)
     app = QApplication(sys.argv)
     app.setApplicationName("NeriPlayer Win")
     app.setOrganizationName("NeriPlayer Win")
     app.setWindowIcon(app_icon())  # 全部窗口/托盘默认图标(M4)
+    report("QApp后")
     _boost_process_priority()  # M5:后台播放场景改善切歌与 UI 响应
     schedule_disk_cache_trim()  # 封面磁盘缓存 LRU 定量清理(32MiB,后台)
     window = MainWindow()
+    report("窗构完")
     window.show()
     return app.exec()

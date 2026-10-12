@@ -88,6 +88,7 @@ from ..data.store import (
     LocalStore,
     apply_stored_order,
 )
+from .. import bootstamp
 from ..i18n import tr
 from ..log import get_logger
 from ..player.engine import PlayerEngine, PlayerEngineError
@@ -2918,6 +2919,7 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         super().showEvent(event)
+        bootstamp.report_show_once()  # 启动桩收尾:窗口首显(仅首次)
         # 缩略图工具栏需窗口已有任务栏按钮:每次显示时尝试附加,
         # 成功一次即固定(离屏/COM 不可用时 attach 恒失败,静默重试无害)
         if self._taskbar is not None:
