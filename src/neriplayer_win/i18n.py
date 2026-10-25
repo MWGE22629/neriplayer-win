@@ -41,6 +41,9 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "sidebar.watchlater": ("稍后再看", "Watch Later"),
     "sidebar.settings": ("设置", "Settings"),
     "sidebar.daily": ("每日推荐", "Daily Recommendations"),
+    # M7 本地歌单分区:分区始终出现,空分区给一行提示而不是占位
+    "sidebar.local_playlists": ("本地歌单", "Local Playlists"),
+    "sidebar.local_empty_hint": ("点右上「+」新建歌单", "Click \"+\" to create one"),
     # -- 歌曲表 -----------------------------------------------------------------
     "table.title": ("标题", "Title"),
     "table.artist": ("歌手", "Artist"),
@@ -72,6 +75,11 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "empty.pick_from_sidebar": (
         "从左侧选择歌单或收藏夹,双击即可播放",
         "Pick a playlist or favorites folder on the left, then double-click to play",
+    ),
+    # M7:空本地歌单专用提示(通用文案对空歌单不贴切)
+    "empty.local_playlist": (
+        "这个歌单还没有歌:在歌曲列表里右键「添加到…」即可收进来",
+        "This playlist is empty. Right-click a song and choose \"Add to…\"",
     ),
     # -- 网易云登录 --------------------------------------------------------------
     "login.title": ("登录网易云音乐", "Sign in to NetEase Cloud Music"),
@@ -154,6 +162,9 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "play.play_next_menu": ("下一首播放", "Play next"),
     "play.play_next_done": ("下一首播放:{title}(队列第 {position} 位)",
                             "Playing next: {title} (position {position} in queue)"),
+    # M7 右键「添加到…」本地歌单
+    "play.add_to_menu": ("添加到…", "Add to…"),
+    "play.add_to_new": ("新建歌单并添加…", "New playlist and add…"),
     "play.repeat_one": ("单曲循环:{title}", "Repeat one: {title}"),
     "play.finished": ("播放完毕", "Playback finished"),
     "play.mode": ("播放模式:{name}", "Play mode: {name}"),
@@ -190,6 +201,29 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "play.no_url": ("无可用播放地址", "No playable URL"),
     "play.prefetch_expired": ("预取地址已过期,正在重新解析:{title}",
                               "Prefetched URL expired. Re-resolving: {title}"),
+    # -- 本地歌单(M7) ----------------------------------------------------------
+    "local.create_prompt": ("新建本地歌单", "New local playlist"),
+    "local.name_label": ("歌单名称", "Playlist name"),
+    "local.name_empty": ("歌单名称不能为空", "Playlist name cannot be empty"),
+    "local.created": ("已创建歌单「{name}」", "Created playlist \"{name}\""),
+    "local.added": ("已添加到「{playlist}」:{title}",
+                    "Added to \"{playlist}\": {title}"),
+    "local.already_added": ("「{playlist}」里已有这首歌:{title}",
+                            "\"{playlist}\" already contains: {title}"),
+    "local.already_tag": ("(已在)", " (added)"),
+    "local.missing": ("歌单已不存在", "Playlist no longer exists"),
+    "local.save_failed": ("保存本地歌单失败,请检查磁盘",
+                          "Failed to save local playlists. Check disk space"),
+    "local.cover_menu": ("设置封面…", "Set cover…"),
+    "local.cover_pick": ("选择歌单封面", "Choose playlist cover"),
+    "local.cover_hint": ("从歌单内歌曲的封面中选一张;未指定时自动使用第一首歌的封面",
+                         "Pick one of the covers in this playlist; otherwise the "
+                         "first song's cover is used"),
+    "local.cover_confirm": ("设为封面", "Use cover"),
+    "local.cover_auto": ("使用自动封面", "Use automatic cover"),
+    "local.cover_set": ("已设置「{name}」的封面", "Cover updated for \"{name}\""),
+    "local.cover_auto_set": ("「{name}」已恢复自动封面",
+                             "\"{name}\" now uses the automatic cover"),
     # -- 播放模式(player.queue display_name/button_label 也走这里)-----------
     "mode.sequence": ("顺序播放", "Sequential"),
     "mode.shuffle": ("随机播放", "Shuffle"),
@@ -297,6 +331,60 @@ _STRINGS: dict[str, tuple[str, str]] = {
         "password). The dialog closes automatically once login is detected; "
         "please wait if the page loads slowly.",
     ),
+    "weblogin.kugou.title": ("酷狗音乐 · 网页登录", "Kugou Music · Web Login"),
+    "weblogin.kugou.hint": (
+        "在下方页面中登录酷狗账号。登录成功后会保存登录凭据,"
+        "用于解析播放地址;歌单功能需要另外扫码授权。",
+        "Sign in to your Kugou account on the page below. Credentials are "
+        "saved for resolving playback URLs; playlist access needs a separate "
+        "QR-code authorization.",
+    ),
+    # -- 酷狗(M6) ---------------------------------------------------------------
+    "sidebar.kugou_playlists": ("酷狗 · 歌单", "Kugou · Playlists"),
+    "sidebar.kugou_login": ("未登录,点击登录", "Not signed in · click to log in"),
+    "sidebar.loading_kugou": ("歌单加载中…", "Loading playlists…"),
+    "kugou.not_inited": ("酷狗客户端未就绪", "Kugou client is not ready"),
+    "kugou.checking": ("正在校验酷狗登录态…", "Checking Kugou sign-in…"),
+    "kugou.check_failed": ("酷狗登录态校验失败:{message}",
+                           "Failed to verify Kugou sign-in: {message}"),
+    "kugou.logged_in": ("已登录酷狗:{name}", "Signed in to Kugou: {name}"),
+    "kugou.expired": ("酷狗登录已过期,请重新登录",
+                      "Kugou sign-in expired · please sign in again"),
+    "kugou.expired_sidebar": ("酷狗登录已过期,点击侧栏「酷狗 · 歌单」重新登录",
+                              "Kugou sign-in expired. Click \"Kugou · Playlists\" "
+                              "in the sidebar to sign in again"),
+    "kugou.auth_expired": ("酷狗登录已过期,请重新登录",
+                           "Kugou sign-in expired · please sign in again"),
+    "kugou.playlist_missing": ("歌单已不存在,请重新加载",
+                               "Playlist no longer exists · reload please"),
+    "kugou.web_login_done": ("已保存酷狗网页登录凭据,现在可以播放了",
+                             "Kugou web credentials saved · playback is available"),
+    "kugou.web_login_missing": ("未取得酷狗登录凭据,播放功能不可用",
+                                "Kugou credentials were not captured; "
+                                "playback is unavailable"),
+    "list.kugou_loaded": ("已加载 {count} 个酷狗歌单",
+                          "Loaded {count} Kugou playlists"),
+    "list.kugou_failed": ("获取酷狗歌单失败:{message}",
+                          "Failed to fetch Kugou playlists: {message}"),
+    "list.kugou_tracks_failed": ("获取酷狗歌单曲目失败:{message}",
+                                 "Failed to fetch Kugou playlist tracks: {message}"),
+    "list.kugou_tracks_failed_hint": ("切换其他歌单,或稍后重试",
+                                      "Switch to another playlist, or retry later"),
+    "search.source_kugou": ("酷狗", "Kugou"),
+    # -- 酷狗扫码登录 -------------------------------------------------------------
+    "kugou.qr.title": ("酷狗音乐 · 扫码登录", "Kugou Music · QR Login"),
+    "kugou.qr.fetching": ("正在获取二维码…", "Fetching QR code…"),
+    "kugou.qr.hint": ("用手机酷狗 App 扫码并确认登录",
+                      "Scan with the Kugou mobile app and confirm"),
+    "kugou.qr.scanned": ("已扫码,请在手机上确认", "Scanned · confirm on your phone"),
+    "kugou.qr.success": ("登录成功", "Signed in"),
+    "kugou.qr.expired": ("二维码已过期,请点「刷新二维码」",
+                         "QR code expired · click Refresh"),
+    "kugou.qr.refresh": ("刷新二维码", "Refresh QR code"),
+    "kugou.qr.failed": ("获取二维码失败:{message}",
+                        "Failed to fetch QR code: {message}"),
+    "kugou.qr.poll_error": ("查询扫码状态失败:{message}",
+                            "Failed to check QR status: {message}"),
     "weblogin.done": ("我已完成登录", "I've finished signing in"),
     "weblogin.cancel": ("取消", "Cancel"),
 }

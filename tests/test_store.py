@@ -193,11 +193,14 @@ class TestLocalStoreSettings:
             "play_quality": "lossless",
             "sidebar_expanded": {
                 "netease": True, "netease-subscribed": True, "bili": True,
-                "recent": True,
+                "kugou": True, "local": True, "recent": True,
             },
             "netease_playlist_order": [],
             "netease_subscribed_order": [],
             "bili_folder_order": [],
+            "kugou_playlist_order": [],
+            "local_playlist_order": [],
+            "section_order": [],
             "recent_max": 8,
             "recent_lists": [],
             "language": "zh",
@@ -307,8 +310,8 @@ class TestApplyStoredOrder:
 
 
 class TestSidebarExpandedSetting:
-    """M5 分区折叠状态:{"netease"/"netease-subscribed"/"bili"/"recent": bool},
-    默认全展开(recent 为「最近」分区)。"""
+    """M5 分区折叠状态:{"netease"/"netease-subscribed"/"bili"/"local"/"recent": bool},
+    默认全展开(recent 为「最近」分区,local 为 M7 本地歌单分区)。"""
 
     def test_defaults(self, tmp_path, monkeypatch):
         store = make_store(tmp_path, monkeypatch)
@@ -316,6 +319,8 @@ class TestSidebarExpandedSetting:
             "netease": True,
             "netease-subscribed": True,
             "bili": True,
+            "kugou": True,
+            "local": True,
             "recent": True,
         }
 
@@ -323,7 +328,7 @@ class TestSidebarExpandedSetting:
         store = make_store(tmp_path, monkeypatch)
         flags = {
             "netease": False, "netease-subscribed": True, "bili": False,
-            "recent": True,
+            "kugou": True, "local": True, "recent": True,
         }
         assert store.save_settings({"sidebar_expanded": flags}) is True
         assert store.load_settings()["sidebar_expanded"] == flags
@@ -343,6 +348,8 @@ class TestSidebarExpandedSetting:
             "netease": True,
             "netease-subscribed": True,
             "bili": False,
+            "kugou": True,
+            "local": True,
             "recent": True,
         }
 
@@ -356,6 +363,8 @@ class TestSidebarExpandedSetting:
             "netease": True,
             "netease-subscribed": True,
             "bili": True,
+            "kugou": True,
+            "local": True,
             "recent": True,
         }
 

@@ -86,13 +86,17 @@ class TestSidebarTreeStructure:
             tree = window.sidebar
             assert isinstance(tree, _SidebarTree)
             assert isinstance(tree, QTreeWidget)
-            # 「搜索」固定置顶(0 号),其后才是三分区
-            assert tree.topLevelItemCount() == 4
-            search, netease, bili, settings = (tree.topLevelItem(i) for i in range(4))
+            # 「搜索」固定置顶(0 号),其后是三个平台分区与「本地歌单」
+            assert tree.topLevelItemCount() == 6
+            search, netease, bili, kugou, local, settings = (
+                tree.topLevelItem(i) for i in range(6)
+            )
             assert search.data(0, _ROLE) == ("search", None)
             assert not search.icon(0).isNull()  # 放大镜图标
             assert netease.data(0, _ROLE) == ("netease-header", None)
             assert bili.data(0, _ROLE) == ("bili-header", None)
+            assert kugou.data(0, _ROLE) == ("kugou-header", None)
+            assert local.data(0, _ROLE) == ("local-header", None)
             assert settings.data(0, _ROLE) == ("settings", None)
             assert settings.childCount() == 0, "「设置」必须是顶层无子节点项"
             # 未登录占位子节点
@@ -100,6 +104,8 @@ class TestSidebarTreeStructure:
             assert netease.child(0).data(0, _ROLE) == ("netease-login", None)
             assert bili.childCount() == 1
             assert bili.child(0).data(0, _ROLE) == ("bili-login", None)
+            assert kugou.childCount() == 1
+            assert kugou.child(0).data(0, _ROLE) == ("kugou-login", None)
             # 分区头启用但不可选中(禁用父项会让子节点无法选中,故不能 NoItemFlags)
             assert not netease.flags() & Qt.ItemFlag.ItemIsSelectable
             assert netease.flags() & Qt.ItemFlag.ItemIsEnabled
@@ -113,7 +119,7 @@ class TestSidebarTreeStructure:
         try:
             window._account = NeteaseAccount(user_id=1, nickname="测试")
             window._rebuild_sidebar()
-            netease = window.sidebar.topLevelItem(1)
+            netease = window.sidebar.find_header("netease")
             assert netease.childCount() == 1
             child = netease.child(0)
             assert child.text(0) == "歌单加载中…"
@@ -122,8 +128,9 @@ class TestSidebarTreeStructure:
 
             window._bili_account = BiliAccount(mid=42, uname="测试")
             window._rebuild_sidebar()
-            # 登录网易云后四分区:歌单 / 收藏 / B站 / 设置
-            bili = window.sidebar.topLevelItem(3)
+            # 按分区键定位,不依赖下标(分区数会随音源增加而变)
+            bili = window.sidebar.find_header("bili")
+            assert bili is not None
             # 稍后再看固定首位,收藏夹加载占位其后
             assert bili.child(0).data(0, _ROLE) == ("bili-watchlater", None)
             assert bili.child(1).text(0) == "收藏夹加载中…"
@@ -225,7 +232,7 @@ class TestSidebarCollapse:
         window = _make_window(qapp, monkeypatch, tmp_path)
         try:
             tree = window.sidebar
-            header = tree.topLevelItem(1)
+            header = tree.find_header("netease")
             assert header.isExpanded()
             QTest.mouseClick(
                 tree.viewport(),
@@ -243,12 +250,14 @@ class TestSidebarCollapse:
                 "netease": False,
                 "netease-subscribed": True,
                 "bili": True,
+                "kugou": True,
+                "local": True,
                 "recent": True,
             }
             # 全量重建后重新应用收起状态(不回弹)
             window._rebuild_sidebar()
-            assert tree.topLevelItem(1).isExpanded() is False
-            assert tree.topLevelItem(2).isExpanded() is True
+            assert tree.find_header("netease").isExpanded() is False
+            assert tree.find_header("bili").isExpanded() is True
         finally:
             _close(window)
 
@@ -261,8 +270,8 @@ class TestSidebarCollapse:
         )
         window = _make_window(qapp, monkeypatch, tmp_path)
         try:
-            assert window.sidebar.topLevelItem(1).isExpanded() is False
-            assert window.sidebar.topLevelItem(2).isExpanded() is True
+            assert window.sidebar.find_header("netease").isExpanded() is False
+            assert window.sidebar.find_header("bili").isExpanded() is True
         finally:
             _close(window)
 
@@ -286,7 +295,7 @@ class TestStoredOrderApplied:
             window._on_playlists_loaded(
                 NeteaseUserPlaylists(created=_netease_playlists(10, 20, 30))
             )
-            header = window.sidebar.topLevelItem(1)
+            header = window.sidebar.find_header("netease")
             roles = [
                 header.child(i).data(0, _ROLE) for i in range(header.childCount())
             ]
@@ -319,8 +328,9 @@ class TestStoredOrderApplied:
             window._on_playlists_loaded(
                 NeteaseUserPlaylists(subscribed=_netease_playlists(10, 20, 30))
             )
-            # 收藏分区是第二个顶层项(「搜索」置顶、无最近条目时)
-            header = window.sidebar.topLevelItem(2)
+            # 按分区键定位:分区位置可由用户拖动改变,不能按下标取
+            header = window.sidebar.find_header("netease-subscribed")
+            assert header is not None
             assert header.data(0, _ROLE) == ("netease-subscribed-header", None)
             roles = [
                 header.child(i).data(0, _ROLE) for i in range(header.childCount())
@@ -387,10 +397,12 @@ class TestSubscribedSection:
                 )
             )
             tree = window.sidebar
-            assert tree.topLevelItemCount() == 5  # 搜索 + 歌单 + 收藏 + B站 + 设置
-            created, subscribed, _bili, _settings = (
-                tree.topLevelItem(i) for i in range(1, 5)
-            )
+            # 搜索 + 歌单 + 收藏 + B站 + 酷狗 + 本地 + 设置
+            assert tree.topLevelItemCount() == 7
+            # 分区位置可由用户拖动改变,一律按键定位
+            created = tree.find_header("netease")
+            subscribed = tree.find_header("netease-subscribed")
+            assert created is not None and subscribed is not None
             assert created.data(0, _ROLE) == ("netease-header", None)
             assert subscribed.data(0, _ROLE) == ("netease-subscribed-header", None)
             # 每日推荐固定首位(不参与拖拽排序)
@@ -418,7 +430,8 @@ class TestSubscribedSection:
             window._on_playlists_loaded(
                 NeteaseUserPlaylists(created=_netease_playlists(1))
             )
-            subscribed = window.sidebar.topLevelItem(2)
+            subscribed = window.sidebar.find_header("netease-subscribed")
+            assert subscribed is not None
             # 每日推荐固定首位,占位在其后
             assert subscribed.child(0).data(0, _ROLE) == ("netease-daily", None)
             child = subscribed.child(1)
@@ -437,8 +450,9 @@ class TestSubscribedSection:
             )
             window._handle_stale_login("登录已过期")
             assert window._subscribed_playlists == []
-            # 未登录:分区消失,顶层回到四项(搜索 + 三分区)
-            assert window.sidebar.topLevelItemCount() == 4
+            # 未登录:收藏分区消失,顶层回到六项
+            # (搜索 + 歌单 + B站 + 酷狗 + 本地 + 设置)
+            assert window.sidebar.topLevelItemCount() == 6
         finally:
             _close(window)
 
@@ -452,7 +466,9 @@ class TestSubscribedSection:
             window._on_playlists_loaded(
                 NeteaseUserPlaylists(subscribed=_netease_playlists(31))
             )
-            item = window.sidebar.topLevelItem(2).child(0)
+            subscribed = window.sidebar.find_header("netease-subscribed")
+            assert subscribed is not None
+            item = subscribed.child(0)
             window._on_sidebar_item_clicked(item, 0)
             assert window.central_stack.currentIndex() == 1  # 切到歌曲表页
             assert len(scheduled) == 1  # 后台加载歌曲,UI 线程零网络
@@ -605,8 +621,8 @@ def _drop_on(tree: _SidebarTree, target: QTreeWidgetItem) -> QDropEvent:
 class TestSidebarDropConstraints:
     def test_cross_section_rejected(self, qapp):
         tree = _make_standalone_tree(qapp)
-        netease_child = tree.topLevelItem(0).child(0)
-        bili_child = tree.topLevelItem(1).child(0)
+        netease_child = tree.find_header("netease").child(0)
+        bili_child = tree.find_header("bili").child(0)
         tree.setCurrentItem(netease_child)
         event = _drop_on(tree, bili_child)
         assert not event.isAccepted()
@@ -615,21 +631,21 @@ class TestSidebarDropConstraints:
 
     def test_drop_on_top_level_rejected(self, qapp):
         tree = _make_standalone_tree(qapp)
-        netease_child = tree.topLevelItem(0).child(0)
+        netease_child = tree.find_header("netease").child(0)
         tree.setCurrentItem(netease_child)
         # 拖到「设置」顶层项上
-        event = _drop_on(tree, tree.topLevelItem(2))
+        event = _drop_on(tree, tree.find_header("settings"))
         assert not event.isAccepted()
         # 拖到「B站」分区头上(同索引顶层)
-        event = _drop_on(tree, tree.topLevelItem(1))
+        event = _drop_on(tree, tree.find_header("bili"))
         assert not event.isAccepted()
         assert tree.section_child_ids("netease") == [1, 2, 3]
 
     def test_moving_top_level_item_rejected(self, qapp):
         tree = _make_standalone_tree(qapp)
-        settings_item = tree.topLevelItem(2)
+        settings_item = tree.find_header("settings")
         tree.setCurrentItem(settings_item)
-        target = tree.topLevelItem(0).child(1)
+        target = tree.find_header("netease").child(1)
         event = _drop_on(tree, target)
         assert not event.isAccepted()
         assert tree.topLevelItemCount() == 3
@@ -639,8 +655,8 @@ class TestSidebarDropConstraints:
         tree = _make_standalone_tree(qapp)
         received: list[str] = []
         tree.order_changed.connect(received.append)
-        p1 = tree.topLevelItem(0).child(0)
-        p3 = tree.topLevelItem(0).child(2)
+        p1 = tree.find_header("netease").child(0)
+        p3 = tree.find_header("netease").child(2)
         tree.setCurrentItem(p1)
         event = _drop_on(tree, p3)
         assert event.isAccepted()
@@ -651,7 +667,7 @@ class TestSidebarDropConstraints:
         tree = _make_standalone_tree(qapp)
         received: list[str] = []
         tree.order_changed.connect(received.append)
-        p2 = tree.topLevelItem(0).child(1)
+        p2 = tree.find_header("netease").child(1)
         tree.setCurrentItem(p2)
         event = _drop_on(tree, p2)
         assert event.isAccepted()
@@ -662,7 +678,7 @@ class TestSidebarDropConstraints:
 class TestSidebarMoveChild:
     def test_move_above_and_below(self, qapp):
         tree = _make_standalone_tree(qapp)
-        header = tree.topLevelItem(0)
+        header = tree.find_header("netease")
         p1, _p2, p3 = (header.child(i) for i in range(3))
         tree._move_child(p3, p1, below=False)  # p3 移到 p1 前
         assert tree.section_child_ids("netease") == [3, 1, 2]
@@ -673,10 +689,10 @@ class TestSidebarMoveChild:
 
     def test_section_of(self, qapp):
         tree = _make_standalone_tree(qapp)
-        assert _SidebarTree.section_of(tree.topLevelItem(0)) == "netease"
-        assert _SidebarTree.section_of(tree.topLevelItem(0).child(0)) == "netease"
-        assert _SidebarTree.section_of(tree.topLevelItem(1)) == "bili"
-        assert _SidebarTree.section_of(tree.topLevelItem(2)) is None
+        assert _SidebarTree.section_of(tree.find_header("netease")) == "netease"
+        assert _SidebarTree.section_of(tree.find_header("netease").child(0)) == "netease"
+        assert _SidebarTree.section_of(tree.find_header("bili")) == "bili"
+        assert _SidebarTree.section_of(tree.find_header("settings")) is None
         assert _SidebarTree.section_of(None) is None
 
 
@@ -689,8 +705,8 @@ class TestSidebarDragPersists:
                 NeteaseUserPlaylists(created=_netease_playlists(10, 20, 30))
             )
             tree = window.sidebar
-            p10 = tree.topLevelItem(1).child(0)
-            p30 = tree.topLevelItem(1).child(2)
+            p10 = tree.find_header("netease").child(0)
+            p30 = tree.find_header("netease").child(2)
             tree.setCurrentItem(p10)
             event = _drop_on(tree, p30)
             assert event.isAccepted()
@@ -1212,7 +1228,7 @@ def _load_table_playlist(
         NeteasePlaylist(id=playlist_id, name="列表B", track_count=count)
     ]
     window._rebuild_sidebar()
-    item = window.sidebar.topLevelItem(1).child(0)
+    item = window.sidebar.find_header("netease").child(0)
     window._on_sidebar_item_clicked(item, 0)
     assert scheduled, "点击歌单应调度一次后台加载"
     fetch, on_done, _on_error = scheduled[-1]
@@ -1349,7 +1365,7 @@ class TestRecentSection:
             self._start(window, ref)
             assert window._recent == [ref]
             # 「最近」分区出现在侧栏最顶(搜索项之下),子节点带来源 payload
-            header = window.sidebar.topLevelItem(1)
+            header = window.sidebar.find_header("recent")
             assert header.data(0, _ROLE) == ("recent-header", None)
             assert header.child(0).data(0, _ROLE) == (
                 "recent-item", ("netease-playlist", 7, "歌单七"),
@@ -1371,9 +1387,8 @@ class TestRecentSection:
         try:
             _load_table_playlist(window, monkeypatch, scheduled, playlist_id=11)
             assert window._recent == []  # 只是浏览,没播放
-            assert window.sidebar.topLevelItem(1).data(0, _ROLE) == (
-                "netease-header", None,
-            )  # 「最近」分区不出现
+            # 「最近」分区不出现(只浏览不起播,最近栈为空)
+            assert window.sidebar.find_header("recent") is None
         finally:
             _close(window)
 
@@ -1436,7 +1451,7 @@ class TestRecentSection:
             self._start(window, _ListRef("netease-playlist", 11, "列表B"))
             _load_table_playlist(window, monkeypatch, scheduled, playlist_id=11)
             # 最近分区的条目重新点击仍能加载(与原生条目同一分发)
-            recent_child = window.sidebar.topLevelItem(1).child(0)
+            recent_child = window.sidebar.find_header("recent").child(0)
             assert recent_child.data(0, _ROLE) == (
                 "recent-item", ("netease-playlist", 11, "列表B"),
             )
@@ -1462,7 +1477,7 @@ class TestRecentSection:
         window2 = _make_window(qapp, monkeypatch, tmp_path)
         try:
             assert window2._recent == [_ListRef("bili-watchlater", 0, "稍后再看")]
-            header = window2.sidebar.topLevelItem(1)
+            header = window2.sidebar.find_header("recent")
             assert header.data(0, _ROLE) == ("recent-header", None)
             assert header.child(0).text(0) == "稍后再看"
         finally:
@@ -1478,7 +1493,7 @@ class TestDailyRecommendSection:
     def _daily_item(self, window):
         window._account = NeteaseAccount(user_id=1, nickname="测试")
         window._rebuild_sidebar()
-        subscribed = window.sidebar.topLevelItem(2)
+        subscribed = window.sidebar.find_header("netease-subscribed")
         assert subscribed.data(0, _ROLE) == ("netease-subscribed-header", None)
         item = subscribed.child(0)
         assert item.data(0, _ROLE) == ("netease-daily", None)

@@ -96,6 +96,24 @@ def bili_web_login() -> WebLoginConfig:
     )
 
 
+def kugou_web_login() -> WebLoginConfig:
+    """酷狗网页登录配置(弹窗时现造,标题/提示随当前语言)。
+
+    酷狗播放接口的鉴权载体是网页登录下发的 KuGoo 复合串(内含 KugooPwd),
+    它无法由扫码 token 推导,所以播放侧必须走一次网页登录。
+    成功判据取 KugooID:实测它在登录完成时与 KuGoo 一同下发。
+    """
+    return WebLoginConfig(
+        title=tr("weblogin.kugou.title"),
+        login_url="https://www.kugou.com/",
+        success_cookie="KugooID",
+        cookie_host_suffix="kugou.com",
+        hint=tr("weblogin.kugou.hint"),
+        user_agent=_WINDOWS_UA,
+        interceptor_factory=None,
+    )
+
+
 class BrowserLoginDialog(QDialog):
     """模态网页登录窗口;成功时 login_cookie_ready 携带 Cookie 字典。"""
 

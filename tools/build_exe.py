@@ -45,7 +45,9 @@ DIST = REPO / "dist" / "neriplayer-win"
 EXE_NAME = "NeriPlayerWin.exe"
 
 APP_NAME = "NeriPlayer Win"
-APP_VERSION = "0.8.0"
+# Windows 资源版本必须是数字四段式(不接受 -beta.1 后缀);
+# 对外展示的版本号见 neriplayer_win.__version__
+APP_VERSION = "0.9.0.1"
 
 # winlibs MinGW(Nuitka 4.2.1 指定版本;变更 Nuitka 版本时需同步更新)
 MINGW_URL_PATH = (
@@ -150,6 +152,10 @@ def nuitka_args(console: bool, jobs: int | None) -> list[str]:
         "--mingw64",  # 无 MSVC 的机器固定用 winlibs gcc,保证可复现
         "--assume-yes-for-downloads",
         "--enable-plugin=pyside6",  # Qt DLL/插件/WebEngine 资产全由该插件搬运
+        # pyside6 插件只搬 shiboken6 的原生 pyd/dll,漏掉该包的纯 Python
+        # 文件(__init__.py / _config.py 等),运行期 `import shiboken6` 会
+        # 抛 ImportError 导致 exe 起不来。这里显式整包纳入。
+        "--include-package=shiboken6",
         "--include-package=neriplayer_win",  # 含函数内延迟 import 的全部子模块
         # UI 资产(ico/png/svg):运行时经 Path(__file__) 相对定位,须镜像进包
         "--include-data-dir=src/neriplayer_win/assets=neriplayer_win/assets",
@@ -211,6 +217,34 @@ def prune_dist() -> None:
     log(f"瘦身完成,删除 {removed / 1e6:.1f} MB")
 
 
+def ensure_python3_dll(dist: Path) -> None:
+    """补 python3.dll。
+
+    原因:shiboken6/Shiboken.pyd 的 PE 导入表里有 `python3.dll`(稳定 ABI
+    转发库),但 Nuitka 只搬了 `python312.dll`,没有搬 `python3.dll`。
+    结果 `import shiboken6` 抛 "DLL load failed while importing Shiboken:
+    找不到指定的模块",exe 直接起不来。Nuitka 的 pyside6 插件与
+    --include-package 都覆盖不到这个转发 DLL,只能在组装阶段手工补。
+    """
+    if (dist / "python3.dll").is_file():
+        return
+    # 解释器同目录的上一级(uv 的 python 安装根)才有 python3.dll
+    candidates = [
+        Path(sys.base_prefix) / "python3.dll",
+        Path(sys.prefix) / "python3.dll",
+        Path(sys.executable).parent / "python3.dll",
+        Path(sys.executable).parent.parent / "python3.dll",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            shutil.copy2(candidate, dist / "python3.dll")
+            log(f"补齐 python3.dll(来源 {candidate})")
+            return
+    raise SystemExit(
+        "缺少 python3.dll 且找不到来源;shiboken6 会导入失败,请检查 Python 安装"
+    )
+
+
 def assemble_dist() -> None:
     if not (NUITKA_DIST / EXE_NAME).is_file():
         raise SystemExit(f"未找到 {NUITKA_DIST / EXE_NAME},构建疑似失败")
@@ -224,6 +258,8 @@ def assemble_dist() -> None:
         raise SystemExit("缺少 bin/mpv-2.dll;请见 README 构建章节先放置运行库")
     (DIST / "bin").mkdir(exist_ok=True)
     shutil.copy2(mpv, DIST / "bin" / "mpv-2.dll")
+
+    ensure_python3_dll(DIST)
 
     for extra in ("LICENSE", "README.md"):
         if (REPO / extra).is_file():

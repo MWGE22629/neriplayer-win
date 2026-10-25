@@ -358,16 +358,23 @@ class TestSearchPageWiring:
             QTest.qWait(50)
             indicator = window._source_indicator
             bar = window._source_bar
-            # 初始:指示线在顶部、贴网易云(左半)
+            # 初始:指示线在顶部、贴网易云(三源中的左三分之一)
             assert indicator.y() == 0 and indicator.height() == 3
             center = indicator.x() + indicator.width() / 2
-            assert center < bar.width() / 2
+            assert center < bar.width() / 3
             window._on_search_source_changed("bili")
             QTest.qWait(400)  # 等滑动动画(250ms)结束
             center = indicator.x() + indicator.width() / 2
-            assert center > bar.width() / 2  # 滑到 B站(右半)
+            # 滑到 B站(三源中的中段)
+            assert bar.width() / 3 < center < bar.width() * 2 / 3
             assert window._search_bili_btn.isChecked()
             assert not window._search_netease_btn.isChecked()
+            # 再滑到酷狗(右三分之一),验证三源指示线都对位
+            window._on_search_source_changed("kugou")
+            QTest.qWait(400)
+            center = indicator.x() + indicator.width() / 2
+            assert center > bar.width() * 2 / 3
+            assert window._search_kugou_btn.isChecked()
         finally:
             _close(window)
 

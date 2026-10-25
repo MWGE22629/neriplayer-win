@@ -561,7 +561,9 @@ class TestSettingsStore:
         raw = json.loads(store.settings_path.read_text(encoding="utf-8"))
         # M4 起新增 appearance、M5 起新增 play_quality / sidebar_expanded /
         # netease_playlist_order / netease_subscribed_order / bili_folder_order /
-        # recent_max / recent_lists / language / dynamic_color 键;未知键始终被拒
+        # recent_max / recent_lists / language / dynamic_color 键、
+        # M6 起新增 kugou_playlist_order、M8 起新增 section_order 键;
+        # 未知键始终被拒
         assert set(raw) == {
             "close_action",
             "play_mode",
@@ -571,6 +573,9 @@ class TestSettingsStore:
             "netease_playlist_order",
             "netease_subscribed_order",
             "bili_folder_order",
+            "kugou_playlist_order",
+            "local_playlist_order",
+            "section_order",
             "recent_max",
             "recent_lists",
             "language",

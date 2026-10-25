@@ -25,6 +25,7 @@ from PySide6.QtGui import (
     QFontMetrics,
     QIcon,
     QPainter,
+    QPen,
     QPixmap,
     QPolygonF,
 )
@@ -32,11 +33,16 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QButtonGroup,
+    QDialog,
+    QDialogButtonBox,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QPushButton,
@@ -65,6 +71,16 @@ from ..api.bili import (
     bili_quality_key_from_netease_level,
     build_bili_stream_headers,
 )
+from ..api.kugou import (
+    KugouAccount,
+    KugouApiError,
+    KugouAuthRequiredError,
+    KugouClient,
+    KugouCredentials,
+    KugouPlaylist,
+    KugouSong,
+    kugou_quality_label,
+)
 from ..api.netease import (
     NeteaseAccount,
     NeteaseAuthRequiredError,
@@ -75,18 +91,27 @@ from ..api.netease import (
 )
 from ..data.store import (
     DEFAULT_RECENT_MAX,
+    LOCAL_PLAYLIST_NAME_MAX,
     SETTING_APPEARANCE,
     SETTING_BILI_FOLDER_ORDER,
     SETTING_DYNAMIC_COLOR,
     SETTING_LANGUAGE,
+    SETTING_KUGOU_PLAYLIST_ORDER,
+    SETTING_LOCAL_PLAYLIST_ORDER,
     SETTING_NETEASE_PLAYLIST_ORDER,
     SETTING_NETEASE_SUBSCRIBED_ORDER,
     SETTING_PLAY_QUALITY,
     SETTING_RECENT_LISTS,
     SETTING_RECENT_MAX,
+    SETTING_SECTION_ORDER,
     SETTING_SIDEBAR_EXPANDED,
+    LocalPlaylist,
+    LocalPlaylistItem,
     LocalStore,
+    apply_section_order,
     apply_stored_order,
+    local_playlist_cover_url,
+    next_local_playlist_id,
 )
 from .. import bootstamp
 from ..i18n import tr
@@ -96,7 +121,12 @@ from ..player.queue import BackupUrlRotator, PlayMode, PlayQueue, QueueSong
 from . import theme
 from . import cover_seed
 from .audio_route import AudioRouteGuard
-from .browser_login import BrowserLoginDialog, bili_web_login
+from .browser_login import (
+    BrowserLoginDialog,
+    bili_web_login,
+    kugou_web_login,
+)
+from .kugou_login import KugouQrLoginDialog
 from .covers import CoverLoader
 from .icons import app_icon, tinted_icon, tinted_icon_with_color, tray_icon
 from .login_page import LoginPage
@@ -196,6 +226,8 @@ _HEADER_SECTION = {
     "netease-header": "netease",
     "netease-subscribed-header": "netease-subscribed",
     "bili-header": "bili",
+    "kugou-header": "kugou",
+    "local-header": "local",
     "recent-header": "recent",
 }
 
@@ -256,6 +288,54 @@ def _bili_item_to_queue(avid: int, bvid: str, title: str, upper: str, duration_s
         artist=sanitize_ui_text(upper), duration_ms=duration_sec * 1000,
         cover_url=cover_url,
     )
+
+
+def _kugou_song_to_queue(song: KugouSong) -> QueueSong:
+    """酷狗歌曲 → 统一队列条目。
+
+    酷狗的播放标识是 hash / encode_album_audio_id 这类字符串,塞不进
+    QueueSong.id(int)。约定:id 恒为 0,真实标识全部放 bvid 字段
+    (该字段本就只承载字符串标识,B站用它存 bvid),多值以
+    `hash|encode_album_audio_id|album_id` 编码。反解见
+    _kugou_song_from_queue,两处必须配对维护。
+    """
+    encoded = "|".join((song.hash, song.encode_album_audio_id, song.album_id))
+    return QueueSong(
+        source="kugou", id=0, bvid=encoded,
+        title=sanitize_ui_text(song.title),
+        artist=sanitize_ui_text(song.artist),
+        duration_ms=song.duration_ms,
+        cover_url=song.cover_url,
+    )
+
+
+def _kugou_song_from_queue(song: QueueSong) -> KugouSong:
+    """统一队列条目 → 酷狗歌曲(解析播放地址用)。
+
+    与 _kugou_song_to_queue 配对。hashes 留空:解析层会按需调
+    get_song_info 补各档 hash,队列条目不必携带。
+    """
+    parts = (song.bvid or "").split("|")
+    while len(parts) < 3:
+        parts.append("")
+    return KugouSong(
+        hash=parts[0],
+        title=song.title,
+        artist=song.artist,
+        duration_ms=song.duration_ms,
+        encode_album_audio_id=parts[1],
+        album_id=parts[2],
+        cover_url=song.cover_url,
+    )
+
+
+def _exec_menu(menu: QMenu, global_pos) -> object | None:
+    """弹出菜单并返回选中动作的薄封装。
+
+    QMenu.exec 是 PySide6 的静态内建方法,无法在类上猴补;包一层模块级
+    函数,测试才能把「弹菜单」换成「直接返回目标动作」。
+    """
+    return menu.exec(global_pos)
 
 
 @dataclass(frozen=True)
@@ -339,6 +419,124 @@ class _EmptyStateView(QWidget):
         self.icon_label.setPixmap(
             tinted_icon_with_color(self._icon_name, color).pixmap(QSize(48, 48))
         )
+
+
+class _CoverPickerDialog(QDialog):
+    """歌单封面选择:列出歌单内各曲封面,选一张作为手动封面(M7 步骤 6)。
+
+    只从歌单内已有歌曲里选,不引入本地文件路径:零新增失效路径,
+    数据全在已有快照里,与「自动封面取首曲」同一数据源。
+    封面字节复用侧栏 loader 的磁盘/内存缓存,缺的现请求,到一张亮一张。
+    """
+
+    # 对话框最多为多少首歌现请求封面(防止超大歌单一次开几十个线程)
+    _MAX_REQUESTS = 60
+
+    def __init__(
+        self,
+        playlist: LocalPlaylist,
+        loader: CoverLoader,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(tr("local.cover_pick"))
+        self.setMinimumSize(360, 420)
+        self._loader = loader
+        # 对话框自己的 64px 图标缓存:侧栏缓存是 18px,共用会把小图放大发糊
+        self._icons: dict[str, QIcon] = {}
+        self._urls_by_item: dict[int, str] = {}
+
+        self.list_widget = QListWidget()
+        self.list_widget.setIconSize(QSize(64, 64))
+        self.list_widget.setViewMode(QListWidget.ViewMode.IconMode)
+        self.list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.list_widget.setMovement(QListWidget.Movement.Static)
+        self.list_widget.setSpacing(6)
+        self.list_widget.setWordWrap(True)
+
+        for row, item in enumerate(playlist.items):
+            if not item.cover_url:
+                continue  # 无封面的曲目没有可选内容
+            entry = QListWidgetItem(sanitize_ui_text(item.title))
+            entry.setData(Qt.ItemDataRole.UserRole, item.cover_url)
+            entry.setSizeHint(QSize(96, 108))
+            icon = self._icons.get(item.cover_url)
+            if icon is not None:
+                entry.setIcon(icon)
+            self.list_widget.addItem(entry)
+            self._urls_by_item[row] = item.cover_url
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(tr("local.cover_confirm"))
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(
+            tr("weblogin.cancel")
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        hint = QLabel(tr("local.cover_hint"))
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addWidget(self.list_widget, 1)
+        layout.addWidget(buttons)
+
+        # 未选中任何封面时「设为封面」不可点
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        self.list_widget.currentItemChanged.connect(self._on_current_changed)
+        self._loader.cover_ready.connect(self._on_cover_ready)
+        self._request_missing()
+
+    def _request_missing(self) -> None:
+        """为尚未缓存封面的曲目发起请求(单曲一次,同 URL 自动去重)。"""
+        pending = [
+            url
+            for url in dict.fromkeys(self._urls_by_item.values())
+            if url not in self._icons
+        ]
+        for url in pending[: self._MAX_REQUESTS]:
+            self._loader.request(url)
+
+    def _on_current_changed(self, current: QListWidgetItem | None, _previous) -> None:
+        # 只有选中项才允许确定:空选中时 OK 无意义
+        ok = self.findChild(QDialogButtonBox)
+        if ok is not None:
+            ok.button(QDialogButtonBox.StandardButton.Ok).setEnabled(current is not None)
+
+    def _on_cover_ready(self, url: str, data: bytes) -> None:
+        if url not in self._urls_by_item.values():
+            return
+        icon = self._icons.get(url)
+        if icon is None:
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(data):
+                return
+            pixmap = rounded_pixmap(pixmap, 64, 8)
+            icon = QIcon(pixmap)
+            self._icons[url] = icon
+        for row in range(self.list_widget.count()):
+            entry = self.list_widget.item(row)
+            if entry.data(Qt.ItemDataRole.UserRole) == url:
+                entry.setIcon(icon)
+
+    def chosen_url(self) -> str:
+        """选中项的封面 URL;未选中返回空串。"""
+        entry = self.list_widget.currentItem()
+        if entry is None:
+            return ""
+        value = entry.data(Qt.ItemDataRole.UserRole)
+        return value if isinstance(value, str) else ""
+
+    def done(self, result: int) -> None:  # noqa: N802 - Qt 命名
+        # 关闭即断线:loader 是长生命周期对象,不能留着指向已销毁对话框的槽
+        try:
+            self._loader.cover_ready.disconnect(self._on_cover_ready)
+        except (RuntimeError, TypeError):
+            pass
+        super().done(result)
 
 
 class _CoverColumnDelegate(QStyledItemDelegate):
@@ -580,7 +778,7 @@ class _NowPlayingBarsDelegate(QStyledItemDelegate):
 
 
 class _SourceBar(QWidget):
-    """搜索来源栏:网易云|B站 平铺两半,顶部一条滑动指示线代表选中。
+    """搜索来源栏:网易云|B站|酷狗 平铺,顶部一条滑动指示线代表选中。
 
     借鉴移动端 PrimaryScrollableTabRow(M3 主标签行):底色透明,
     选中不铺满颜色,只有 primary 色指示线贴着选中页签文字宽居中,
@@ -591,6 +789,7 @@ class _SourceBar(QWidget):
         self,
         netease_button: QPushButton,
         bili_button: QPushButton,
+        kugou_button: QPushButton,
         on_layout_changed,
         parent: QWidget | None = None,
     ) -> None:
@@ -600,6 +799,7 @@ class _SourceBar(QWidget):
         layout.setSpacing(0)
         layout.addWidget(netease_button, 1)
         layout.addWidget(bili_button, 1)
+        layout.addWidget(kugou_button, 1)
         self.indicator = QWidget(self)
         self.indicator.setObjectName("searchSourceIndicator")
         self.indicator.setFixedHeight(3)
@@ -627,24 +827,50 @@ class _SourceBar(QWidget):
 
 
 class _SidebarTree(QTreeWidget):
-    """侧栏树(M5):四分区顶层项(网易云歌单/网易云收藏/B站/设置)+ 分区内子节点。
+    """侧栏树:顶层分区头(网易云歌单/网易云收藏/B站/酷狗/本地歌单/最近/
+    设置)+ 分区内子节点。
 
-    拖拽排序做硬约束:只允许「同一分区内」的子节点(歌单/收藏夹)移动。
-    dropEvent 不交给 Qt 默认实现(默认会把子节点挂成目标节点的子节点,
-    产生意外嵌套),而是手动搬移;合法移动后发 order_changed(分区键),
-    由 MainWindow 读子节点顺序落库。拖到顶层项(含分区头与「设置」)、
-    跨分区、空白处,或试图拖动顶层项/登录占位/固定项(稍后再看)时直接
-    ignore,不落库。
+    两层拖拽,语义分开:
+
+    - 子节点(歌单/收藏夹):只允许「同一分区内」移动。dropEvent 不交给 Qt
+      默认实现(默认会把子节点挂成目标节点的子节点,产生意外嵌套),而是
+      手动搬移;合法移动后发 order_changed(分区键),由 MainWindow 读子节点
+      顺序落库。跨分区、空白处、登录占位、固定项(稍后再看)一律 ignore。
+    - 分区头(大类):允许互相换序,拖到「搜索」或「设置」上则拒绝(这两个
+      固定置顶/置底)。换序后发 section_order_changed(分区键序列)。
+
+    M8 另加分区头右侧的竖排「⋮」把手:分区头是 QTreeWidgetItem 而非控件,
+    挂 setItemWidget 会遮住 item 自绘并要在每次重建时管理 widget 生命周期,
+    故与「+」同法在 paintEvent 里自绘、mouseMoveEvent 里做悬停反馈。
+    把手只作视觉提示与光标反馈,实际拖拽由 QTreeWidget 内建 InternalMove
+    承担(按住分区头任意处拖动都有效,不必精确按在三个点上)。
     """
 
-    order_changed = Signal(str)  # 分区键 "netease" | "netease-subscribed" | "bili"
+    order_changed = Signal(str)  # 分区键 "netease" | "netease-subscribed" | "bili" | "kugou" | "local"
+    # 分区头换序完成:参数是新的分区键序列(只含可排序分区,不含搜索/设置)
+    section_order_changed = Signal(list)
+    # 分区头「+」被点击:请求新建本地歌单(实际弹窗与落盘在 MainWindow)
+    create_local_playlist_requested = Signal()
 
     # 可参与排序的子节点 kind(分区键 → 子节点 kind)
     _SECTION_CHILD_KIND = {
         "netease": "netease-playlist",
         "netease-subscribed": "netease-subscribed-playlist",
         "bili": "bili-folder",
+        "kugou": "kugou-playlist",
+        "local": "local-playlist",
     }
+
+    # 「+」命中区宽度(逻辑像素)与距右边缘的留白
+    _PLUS_HIT_WIDTH = 22
+    _PLUS_RIGHT_MARGIN = 4
+    # 「+」笔画长度与线宽(逻辑像素)
+    _PLUS_STROKE = 9
+    _PLUS_PEN_WIDTH = 2
+    # 「⋮」把手:命中区宽度、点半径、点间距(逻辑像素)
+    _GRIP_HIT_WIDTH = 14
+    _GRIP_DOT_RADIUS = 1.4
+    _GRIP_DOT_GAP = 4.0
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -664,6 +890,11 @@ class _SidebarTree(QTreeWidget):
         # 常驻内存增加约 50MB WorkingSet。
         self.setRootIsDecorated(False)
         self.setIndentation(14)  # 子节点仅保留小幅层级缩进,无分支列
+        # 「+」与「⋮」的 hover 反馈需要无按键的鼠标移动事件
+        self.setMouseTracking(True)
+        self._plus_hover = False
+        # 当前悬停的「⋮」所属分区键(None=没悬停在任何把手上)
+        self._grip_hover: str | None = None
 
     @staticmethod
     def item_kind(item: QTreeWidgetItem | None) -> str:
@@ -673,15 +904,186 @@ class _SidebarTree(QTreeWidget):
         role = item.data(0, Qt.ItemDataRole.UserRole)
         return role[0] if isinstance(role, tuple) else ""
 
+    # -- 分区头「+」(自绘命中区) ---------------------------------------------
+
+    def local_header_plus_rect(self) -> QRect | None:
+        """「本地歌单」分区头右侧「+」的命中区(视口坐标);无该分区返回 None。
+
+        绘制与命中判定共用这一个函数,避免两处各算一遍导致漂移;
+        宽度按视口现算,侧栏拖动变宽/变窄时自动跟随。
+        """
+        header = self.find_header("local")
+        if header is None:
+            return None
+        row = self.visualItemRect(header)
+        if not row.isValid() or row.width() <= 0:
+            return None
+        # 分区头滚动到视口外/部分可见时,只保留可见的那段(竖向上裁剪)
+        visible = row.intersected(self.viewport().rect())
+        if visible.height() <= 0:
+            return None
+        width = min(self._PLUS_HIT_WIDTH, max(0, row.width() - 24))
+        if width <= 0:
+            return None
+        return QRect(
+            self.viewport().width() - self._PLUS_RIGHT_MARGIN - width,
+            visible.top(),
+            width,
+            visible.height(),
+        )
+
+    def _draw_plus(self, painter: QPainter, rect: QRect) -> None:
+        """画「+」:两条线段,主题色(悬停时 primary),2x 内不依赖字体。"""
+        color = QColor(
+            theme.current_palette()["primary" if self._plus_hover else "onSurfaceVariant"]
+        )
+        color.setAlpha(255 if self._plus_hover else 170)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(color)
+        pen.setWidthF(self._PLUS_PEN_WIDTH)
+        painter.setPen(pen)
+        center = rect.center()
+        half = self._PLUS_STROKE / 2
+        painter.drawLine(
+            QPointF(center.x() - half, center.y()), QPointF(center.x() + half, center.y())
+        )
+        painter.drawLine(
+            QPointF(center.x(), center.y() - half), QPointF(center.x(), center.y() + half)
+        )
+        painter.restore()
+
+    # -- 分区头「⋮」把手(自绘 + 拖动换序) -----------------------------------
+
+    def _sortable_headers(self) -> list[tuple[str, QTreeWidgetItem]]:
+        """当前可拖排序的分区头 [(分区键, item)];搜索/设置不在其中。"""
+        headers: list[tuple[str, QTreeWidgetItem]] = []
+        for row in range(self.topLevelItemCount()):
+            item = self.topLevelItem(row)
+            section = _HEADER_SECTION.get(self.item_kind(item))
+            if section is not None:
+                headers.append((section, item))
+        return headers
+
+    def header_grip_rect(self, header: QTreeWidgetItem) -> QRect | None:
+        """某个分区头右侧「⋮」的命中区(视口坐标);不可见时返回 None。
+
+        与「+」的算法同构:绘制与命中共用,窗口缩放自动跟随。
+        「搜索」「设置」固定位置,不画把手,这里直接返回 None(绘制与命中
+        都走本函数,拒绝一次即两处一致)。
+        """
+        if _HEADER_SECTION.get(self.item_kind(header)) is None:
+            return None
+        row = self.visualItemRect(header)
+        if not row.isValid() or row.width() <= 0:
+            return None
+        visible = row.intersected(self.viewport().rect())
+        if visible.height() <= 0:
+            return None
+        width = min(self._GRIP_HIT_WIDTH, max(0, row.width() - 24))
+        if width <= 0:
+            return None
+        return QRect(
+            self.viewport().width() - self._PLUS_RIGHT_MARGIN - width,
+            visible.top(),
+            width,
+            visible.height(),
+        )
+
+    def _draw_grip(self, painter: QPainter, rect: QRect, hovered: bool) -> None:
+        """画竖排三点:纯线段/圆点,不依赖字体(同「+」的理由)。"""
+        color = QColor(
+            theme.current_palette()["primary" if hovered else "onSurfaceVariant"]
+        )
+        color.setAlpha(255 if hovered else 140)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        center = rect.center()
+        radius = self._GRIP_DOT_RADIUS
+        gap = self._GRIP_DOT_GAP
+        for offset in (-gap, 0.0, gap):
+            painter.drawEllipse(
+                QPointF(center.x(), center.y() + offset), radius, radius
+            )
+        painter.restore()
+
+    def _grip_hit_section(self, point: QPoint) -> str | None:
+        """点在哪个分区头的把手上,返回该分区键;未命中返回 None。"""
+        for section, header in self._sortable_headers():
+            rect = self.header_grip_rect(header)
+            if rect is not None and rect.contains(point):
+                return section
+        return None
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().paintEvent(event)
+        painter = QPainter(self.viewport())
+        try:
+            # 「+」只在本地歌单分区头上
+            plus_rect = self.local_header_plus_rect()
+            if plus_rect is not None:
+                self._draw_plus(painter, plus_rect)
+            # 「⋮」在每个可排序分区头上
+            for section, header in self._sortable_headers():
+                rect = self.header_grip_rect(header)
+                if rect is not None:
+                    self._draw_grip(
+                        painter, rect, hovered=(self._grip_hover == section)
+                    )
+        finally:
+            painter.end()
+
+    def _plus_hit(self, point: QPoint) -> bool:
+        rect = self.local_header_plus_rect()
+        return rect is not None and rect.contains(point)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        # 命中「+」先于折叠语义处理:吞掉事件,不让分区头收到点击
+        if event.button() == Qt.MouseButton.LeftButton and self._plus_hit(
+            event.position().toPoint()
+        ):
+            event.accept()
+            self.create_local_playlist_requested.emit()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        point = event.position().toPoint()
+        plus_hover = self._plus_hit(point)
+        grip_hover = self._grip_hit_section(point)
+        if plus_hover != self._plus_hover or grip_hover != self._grip_hover:
+            self._plus_hover = plus_hover
+            self._grip_hover = grip_hover
+            self.viewport().update()
+        # 悬停在把手上时给出「可拖动」光标,提示这里能抓
+        if grip_hover is not None:
+            self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.viewport().unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if self._plus_hover or self._grip_hover is not None:
+            self._plus_hover = False
+            self._grip_hover = None
+            self.viewport().unsetCursor()
+            self.viewport().update()
+        super().leaveEvent(event)
+
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802 - Qt 命名
         selected = self.selectedItems()
         dragged = selected[0] if len(selected) == 1 else None
-        if (
-            dragged is None
-            or dragged.parent() is None
-            or self.item_kind(dragged) not in self._SECTION_CHILD_KIND.values()
-        ):
-            # 顶层项(分区头/设置)与登录占位都不可移动
+        if dragged is None:
+            event.ignore()
+            return
+        # 分区头拖动:走顶层换序分支(与子节点拖动语义分开)
+        if dragged.parent() is None:
+            self._drop_header(event, dragged)
+            return
+        if self.item_kind(dragged) not in self._SECTION_CHILD_KIND.values():
+            # 登录占位、加载占位、固定项(稍后再看/每日推荐)不可移动
             event.ignore()
             return
         target = self.itemAt(event.position().toPoint())
@@ -706,6 +1108,52 @@ class _SidebarTree(QTreeWidget):
         section = _HEADER_SECTION.get(self.item_kind(dragged.parent()))
         if section is not None:
             self.order_changed.emit(section)
+
+    def _drop_header(self, event: QDropEvent, dragged: QTreeWidgetItem) -> None:
+        """分区头换序:只允许在可排序分区之间移动。
+
+        「搜索」固定置顶、「设置」固定置底,拖到它们上或拖它们本身一律拒绝;
+        判定用被拖项与目标项的 item_kind,不看 payload。
+        """
+        dragged_section = _HEADER_SECTION.get(self.item_kind(dragged))
+        if dragged_section is None:
+            # 「搜索」/「设置」不参与排序
+            event.ignore()
+            return
+        target = self.itemAt(event.position().toPoint())
+        if target is None:
+            event.ignore()
+            return
+        # 落点可能是分区头的子节点(拖到展开的分区内部):上溯到其顶层项
+        while target.parent() is not None:
+            target = target.parent()
+        if target is dragged:
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+            return
+        target_section = _HEADER_SECTION.get(self.item_kind(target))
+        if target_section is None:
+            # 拖到「搜索」或「设置」上:拒绝(它们是固定位置)
+            event.ignore()
+            return
+        indicator = self.dropIndicatorPosition()
+        below = indicator != QAbstractItemView.DropIndicatorPosition.AboveItem
+        old_index = self.indexOfTopLevelItem(dragged)
+        new_index = self.indexOfTopLevelItem(target) + (1 if below else 0)
+        if old_index < new_index:
+            new_index -= 1
+        if old_index == new_index:
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+            return
+        self.takeTopLevelItem(old_index)
+        self.insertTopLevelItem(new_index, dragged)
+        self.setCurrentItem(dragged)
+        event.setDropAction(Qt.DropAction.MoveAction)
+        event.accept()
+        self.section_order_changed.emit(
+            [section for section, _item in self._sortable_headers()]
+        )
 
     def _move_child(
         self, dragged: QTreeWidgetItem, target: QTreeWidgetItem, below: bool
@@ -798,6 +1246,15 @@ class MainWindow(QMainWindow):
         # 稍后再看条数(None=未加载,侧栏条目不显示计数)
         self._bili_watchlater_count: int | None = None
 
+        # 本地歌单(M7):内存副本按侧栏显示顺序排列,落盘走 local_playlists.json
+        self._local_playlists: list[LocalPlaylist] = []
+
+        # 酷狗(M6):凭据两条链(扫码 token 管歌单、网页 KuGoo 串管播放),
+        # 见 docs/research/M6-kugou-api.md §2.6
+        self._kugou_client = KugouClient()
+        self._kugou_account: KugouAccount | None = None
+        self._kugou_playlists: list[KugouPlaylist] = []
+
         self._queue = PlayQueue(mode=PlayMode(self._settings.get("play_mode", "sequence")))
         # 表格(浏览的列表)与播放队列解耦:侧栏点击只浏览,双击表格才把
         # 该列表装入队列起播;右键「下一首播放」在队列当前曲后插播。
@@ -841,6 +1298,14 @@ class MainWindow(QMainWindow):
         self._dynamic_seed: int | None = None  # 当前生效的动态种子(ARGB)
         self._seed_url = ""  # 提取请求对应的封面 URL(过期回调丢弃用)
         self._seed_generation = 0  # 切歌/清歌作废在途提取
+        # 侧栏歌单封面(M7):第三实例,理由与 seed loader 同构——表格预取的
+        # preload 批次会互相作废,歌单封面不能跟表格抢同一个实例;磁盘缓存
+        # 按 URL 共享,同一首歌的封面不会重复下载。
+        self._sidebar_cover_loader = CoverLoader(self)
+        self._sidebar_cover_loader.cover_ready.connect(self._on_sidebar_cover_ready)
+        # 已解码的歌单封面(URL → QIcon);侧栏重建时直接复用,不重新解码
+        self._sidebar_cover_icons: dict[str, QIcon] = {}
+        self._sidebar_cover_urls: list[str] = []
 
         try:
             self.engine = PlayerEngine()
@@ -920,7 +1385,10 @@ class MainWindow(QMainWindow):
 
         self._search_netease_btn = QPushButton(tr("search.source_netease"))
         self._search_bili_btn = QPushButton(tr("search.source_bili"))
-        for button in (self._search_netease_btn, self._search_bili_btn):
+        self._search_kugou_btn = QPushButton(tr("search.source_kugou"))
+        for button in (
+            self._search_netease_btn, self._search_bili_btn, self._search_kugou_btn
+        ):
             button.setObjectName("searchSourceBtn")
             button.setCheckable(True)
             button.setFixedHeight(_SEARCH_BAR_HEIGHT)
@@ -928,16 +1396,21 @@ class MainWindow(QMainWindow):
         self._search_group = QButtonGroup(self)
         self._search_group.addButton(self._search_netease_btn)
         self._search_group.addButton(self._search_bili_btn)
+        self._search_group.addButton(self._search_kugou_btn)
         self._search_netease_btn.clicked.connect(
             lambda: self._on_search_source_changed("netease")
         )
         self._search_bili_btn.clicked.connect(
             lambda: self._on_search_source_changed("bili")
         )
+        self._search_kugou_btn.clicked.connect(
+            lambda: self._on_search_source_changed("kugou")
+        )
         # 来源栏:M3 主标签行风格,顶部滑动指示线代表选中
         self._source_bar = _SourceBar(
             self._search_netease_btn,
             self._search_bili_btn,
+            self._search_kugou_btn,
             on_layout_changed=lambda: self._update_source_indicator(animate=False),
         )
         self._source_indicator = self._source_bar.indicator
@@ -985,6 +1458,20 @@ class MainWindow(QMainWindow):
         # 分区头折叠走同一个槽(见 _on_sidebar_item_clicked)
         self.sidebar.itemClicked.connect(self._on_sidebar_item_clicked)
         self.sidebar.order_changed.connect(self._on_sidebar_order_changed)
+        # M8:分区头「⋮」拖动换序(搜索/设置固定,不参与)
+        self.sidebar.section_order_changed.connect(
+            self._on_section_order_changed
+        )
+        # 分区头「+」(本地歌单)与歌单右键菜单(M7)
+        self.sidebar.create_local_playlist_requested.connect(
+            self._on_create_local_playlist_requested
+        )
+        self.sidebar.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.sidebar.customContextMenuRequested.connect(
+            self._on_sidebar_context_menu
+        )
         # 折叠状态持久化挂在 itemExpanded/itemCollapsed 上(单击分区头
         # 经 _toggle_sidebar_section 程序化切换也走这两个信号);
         # _rebuild_sidebar 重建时被 blockSignals 抑制
@@ -1055,6 +1542,8 @@ class MainWindow(QMainWindow):
         self.login_page.start()
         self._boot_from_store()
         self._boot_bili_from_store()
+        self._boot_kugou_from_store()
+        self._boot_local_playlists()
 
         if self.engine is None:
             self.statusBar().showMessage(self._engine_error, 10000)
@@ -1199,6 +1688,217 @@ class MainWindow(QMainWindow):
         self._rebuild_sidebar()
         self.statusBar().showMessage(message)
 
+    # -- 酷狗(M6)登录流程 -----------------------------------------------------
+
+    def _boot_kugou_from_store(self) -> None:
+        """启动恢复酷狗登录态。
+
+        凭据有两条独立链(见 docs/research/M6-kugou-api.md §2.6):
+        - token 链:管歌单,启动时静默续期,只要不超 30 天用户无需重扫
+        - KuGoo 链:管播放,网页登录产物,无法续期
+        因此这里只要读到任一链就先进入登录态,再后台校验 token;
+        token 校验失败只清 token 链,不清 KuGoo 链(播放仍可用)。
+        """
+        bundle = self._store.load_kugou()
+        if not bundle:
+            return
+        credentials = KugouCredentials(
+            userid=bundle.get("userid", ""),
+            token=bundle.get("token", ""),
+            t1=bundle.get("t1", ""),
+            vip_token=bundle.get("vip_token", ""),
+            vip_type=bundle.get("vip_type", 0),
+            t_expire_time=bundle.get("t_expire_time", 0),
+            nickname=bundle.get("nickname", ""),
+            mid=bundle.get("mid", ""),
+            dfid=bundle.get("dfid", ""),
+            kugoo_cookie=bundle.get("kugoo_cookie", ""),
+            kugoo_cookie_at=bundle.get("kugoo_cookie_at", 0),
+        )
+        self._kugou_client.set_credentials(credentials)
+        # 续期成功后立即落盘,保证下次启动用的是新 token
+        self._kugou_client.set_refresh_callback(self._on_kugou_credentials_refreshed)
+        if credentials.has_login:
+            self._kugou_account = KugouAccount(
+                userid=int(credentials.userid or 0), nickname=credentials.nickname
+            )
+            self._rebuild_sidebar()
+            run_async(
+                self._kugou_boot_check,
+                on_done=self._on_kugou_boot_status,
+                on_error=lambda message: logger.info("酷狗启动校验失败:%s", message),
+            )
+
+    def _kugou_boot_check(self) -> object:
+        """启动校验:先静默续期(距过期不足 3 天),再验登录态。"""
+        self._kugou_client.ensure_fresh_credentials()
+        return self._kugou_client.verify_login()
+
+    def _on_kugou_boot_status(self, account) -> None:
+        if account is None:
+            # token 链失效:只清 token,保留 KuGoo 串(播放仍要靠它)
+            self._kugou_account = None
+            self._kugou_playlists = []
+            self._rebuild_sidebar()
+            self.statusBar().showMessage(tr("kugou.expired_sidebar"))
+            return
+        self._enter_kugou_logged_in(account)
+
+    def _on_kugou_credentials_refreshed(self, credentials: KugouCredentials) -> None:
+        """续期回调:把新凭据写回磁盘(在后台线程被调用,只碰 store)。"""
+        self._store.save_kugou(
+            {
+                "userid": credentials.userid,
+                "token": credentials.token,
+                "t1": credentials.t1,
+                "vip_token": credentials.vip_token,
+                "vip_type": credentials.vip_type,
+                "t_expire_time": credentials.t_expire_time,
+                "nickname": credentials.nickname,
+                "mid": credentials.mid,
+                "dfid": credentials.dfid,
+                "kugoo_cookie": credentials.kugoo_cookie,
+                "kugoo_cookie_at": credentials.kugoo_cookie_at,
+            }
+        )
+
+    def _enter_kugou_logged_in(self, account: KugouAccount) -> None:
+        self._kugou_account = account
+        # 补写 profile,下次启动无需等校验就知道账号
+        credentials = self._kugou_client.credentials()
+        self._store.save_kugou(
+            {
+                "userid": credentials.userid,
+                "token": credentials.token,
+                "t1": credentials.t1,
+                "vip_token": credentials.vip_token,
+                "vip_type": credentials.vip_type,
+                "t_expire_time": credentials.t_expire_time,
+                "nickname": account.nickname or credentials.nickname,
+                "mid": credentials.mid,
+                "dfid": credentials.dfid,
+                "kugoo_cookie": credentials.kugoo_cookie,
+                "kugoo_cookie_at": credentials.kugoo_cookie_at,
+            }
+        )
+        self.statusBar().showMessage(
+            tr("kugou.logged_in", name=account.nickname or account.userid)
+        )
+        self._rebuild_sidebar()
+        self._load_kugou_playlists()
+
+    def _handle_kugou_stale_login(self, message: str) -> None:
+        """酷狗登录失效:清 token 链,保留 KuGoo 串(播放仍可用)。"""
+        credentials = self._kugou_client.credentials()
+        self._kugou_client.set_credentials(
+            KugouCredentials(
+                userid=credentials.userid,
+                token="",
+                t1=credentials.t1,
+                vip_token=credentials.vip_token,
+                vip_type=credentials.vip_type,
+                nickname=credentials.nickname,
+                mid=credentials.mid,
+                dfid=credentials.dfid,
+                kugoo_cookie=credentials.kugoo_cookie,
+                kugoo_cookie_at=credentials.kugoo_cookie_at,
+            )
+        )
+        self._kugou_account = None
+        self._kugou_playlists = []
+        self._on_kugou_credentials_refreshed(self._kugou_client.credentials())
+        self._rebuild_sidebar()
+        self.statusBar().showMessage(message)
+
+    def _handle_kugou_section_click(self) -> None:
+        """侧栏「酷狗 · 未登录」被点击:先验 token,再按需补网页登录。"""
+        if self._kugou_client.has_login():
+            self.statusBar().showMessage(tr("kugou.checking"))
+            run_async(
+                self._kugou_boot_check,
+                on_done=self._on_kugou_section_status,
+                on_error=lambda message: self.statusBar().showMessage(
+                    tr("kugou.check_failed", message=message)
+                ),
+            )
+        else:
+            self._open_kugou_login_dialog()
+
+    def _on_kugou_section_status(self, account) -> None:
+        if account is not None:
+            self._enter_kugou_logged_in(account)
+            return
+        self._handle_kugou_stale_login(tr("kugou.expired"))
+        self._open_kugou_login_dialog()
+
+    def _open_kugou_login_dialog(self) -> None:
+        """酷狗登录:先扫码(token 链),再按需补网页登录(KuGoo 链)。
+
+        两步的原因见 docs/research/M6-kugou-api.md §2.6:扫码 token 管歌单,
+        网页 KuGoo 串管播放,两者互不替代。已有 KuGoo 串时跳过第二步,
+        避免用户每次重扫都要重登一次网页。
+        """
+        dialog = KugouQrLoginDialog(self._kugou_client, self)
+        dialog.login_credentials_ready.connect(self._on_kugou_qr_ready)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if not self._kugou_client.credentials().has_web_login:
+            self._open_kugou_web_login_dialog()
+
+    def _on_kugou_qr_ready(self, credentials: KugouCredentials) -> None:
+        self.statusBar().showMessage(tr("kugou.qr.success"))
+        self._on_kugou_credentials_refreshed(credentials)
+        self._enter_kugou_logged_in(
+            KugouAccount(
+                userid=int(credentials.userid or 0),
+                nickname=credentials.nickname,
+            )
+        )
+
+    def _open_kugou_web_login_dialog(self) -> None:
+        """网页登录补 KuGoo 串(播放侧凭据)。已有则直接返回。"""
+        credentials = self._kugou_client.credentials()
+        if credentials.has_web_login:
+            return
+        dialog = BrowserLoginDialog(kugou_web_login(), self)
+        dialog.login_cookie_ready.connect(self._on_kugou_web_cookies)
+        dialog.exec()
+
+    def _on_kugou_web_cookies(self, cookies: dict) -> None:
+        """网页登录成功:保存 KuGoo 串,补齐播放侧凭据。
+
+        token 链可能已有(扫码在先),这里合并后再落盘。
+        """
+        kugoo_cookie = str(cookies.get("KuGoo") or "").strip()
+        if not kugoo_cookie:
+            self.statusBar().showMessage(tr("kugou.web_login_missing"))
+            return
+        credentials = self._kugou_client.credentials()
+        merged = KugouCredentials(
+            userid=str(cookies.get("KugooID") or credentials.userid),
+            token=credentials.token,
+            t1=credentials.t1 or str(cookies.get("t1") or ""),
+            vip_token=credentials.vip_token,
+            vip_type=credentials.vip_type,
+            t_expire_time=credentials.t_expire_time,
+            nickname=credentials.nickname or str(cookies.get("UserName") or ""),
+            mid=str(cookies.get("mid") or cookies.get("kg_mid") or credentials.mid),
+            dfid=str(cookies.get("dfid") or cookies.get("kg_dfid") or credentials.dfid),
+            kugoo_cookie=kugoo_cookie,
+            kugoo_cookie_at=int(time.time()),
+        )
+        self._kugou_client.set_credentials(merged)
+        self._on_kugou_credentials_refreshed(merged)
+        self.statusBar().showMessage(tr("kugou.web_login_done"))
+        self._rebuild_sidebar()
+        if merged.has_login and self._kugou_account is None:
+            # 只做了网页登录:补一次 token 校验,能用就进登录态
+            run_async(
+                self._kugou_client.verify_login,
+                on_done=self._on_kugou_boot_status,
+                on_error=lambda message: logger.info("酷狗网页登录后校验失败:%s", message),
+            )
+
     def _handle_bili_section_click(self) -> None:
         """侧栏「B站 · 未登录」被点击:有残留 cookie 先验证,否则弹网页登录。"""
         if self._bili_client.has_login():
@@ -1219,6 +1919,253 @@ class MainWindow(QMainWindow):
             return
         self._handle_bili_stale_login(tr("bili.expired"))
         self._open_bili_login_dialog()
+
+    # -- 本地歌单(M7) --------------------------------------------------------
+
+    def _boot_local_playlists(self) -> None:
+        """启动加载本地歌单:读文件 → 套用拖拽顺序 → 重建侧栏 → 预取封面。
+
+        不依赖任何登录态,断网也能列出;封面 URL 直接来自快照,无需回源。
+        """
+        self._local_playlists = self._apply_stored_order(
+            self._store.load_local_playlists(),
+            SETTING_LOCAL_PLAYLIST_ORDER,
+            lambda p: p.id,
+        )
+        self._rebuild_sidebar()
+        self._preload_local_playlist_covers()
+
+    def _save_local_playlists(self) -> bool:
+        """整份落盘;失败在状态栏提示(与 save_settings 的契约一致)。"""
+        if self._store.save_local_playlists(self._local_playlists):
+            return True
+        self.statusBar().showMessage(tr("local.save_failed"))
+        return False
+
+    def _find_local_playlist(self, playlist_id: int) -> LocalPlaylist | None:
+        return next(
+            (p for p in self._local_playlists if p.id == playlist_id), None
+        )
+
+    def _create_local_playlist(self, name: str) -> LocalPlaylist | None:
+        """新建本地歌单:分配 id、追加内存、落盘、重建侧栏。
+
+        空名拒绝(不做静默改名),返回 None 由调用方提示。
+        """
+        cleaned = name.strip()[:LOCAL_PLAYLIST_NAME_MAX]
+        if not cleaned:
+            self.statusBar().showMessage(tr("local.name_empty"))
+            return None
+        playlist = LocalPlaylist(
+            id=next_local_playlist_id(self._local_playlists),
+            name=cleaned,
+            created_at=int(time.time() * 1000),
+        )
+        self._local_playlists.append(playlist)
+        self._save_local_playlists()
+        self._rebuild_sidebar()
+        self.statusBar().showMessage(tr("local.created", name=cleaned))
+        return playlist
+
+    def _add_song_to_local_playlist(
+        self, playlist_id: int, song: QueueSong
+    ) -> bool:
+        """把一首歌加进指定本地歌单;同 (source, id) 已在则不改动,返回 False。
+
+        歌单是「集合」语义(不同于队列允许重复),故写入侧再查一次重,
+        防重复点击/并发路径绕过菜单置灰。
+        """
+        playlist = self._find_local_playlist(playlist_id)
+        if playlist is None:
+            return False
+        # 去重键要带上音源私有标识:酷狗 id 恒为 0,真实标识在 bvid 里,
+        # 只按 (source, id) 会把不同酷狗歌判成同一首
+        extra = (
+            {"bvid": song.bvid}
+            if song.source in ("bili", "kugou") and song.bvid
+            else {}
+        )
+        candidate = LocalPlaylistItem(
+            source=song.source, id=song.id, extra=extra,
+            title=song.title, artist=song.artist,
+            duration_ms=song.duration_ms, cover_url=song.cover_url,
+        )
+        if any(item.key == candidate.key for item in playlist.items):
+            self.statusBar().showMessage(
+                tr("local.already_added", title=song.title, playlist=playlist.name)
+            )
+            return False
+        playlist.items.append(candidate)
+        self._save_local_playlists()
+        self._refresh_local_playlist_views(playlist)
+        self.statusBar().showMessage(
+            tr("local.added", title=song.title, playlist=playlist.name)
+        )
+        return True
+
+    def _local_playlist_songs(self, playlist: LocalPlaylist) -> list[QueueSong]:
+        """快照条目 → 统一队列条目;展示侧净化文本,存储侧保留原文。"""
+        return [
+            QueueSong(
+                source=item.source,
+                id=item.id,
+                bvid=item.extra.get("bvid", ""),
+                title=sanitize_ui_text(item.title),
+                artist=sanitize_ui_text(item.artist),
+                duration_ms=item.duration_ms,
+                cover_url=item.cover_url,
+            )
+            for item in playlist.items
+        ]
+
+    def _refresh_local_playlist_views(self, playlist: LocalPlaylist) -> None:
+        """歌单内容变化后的刷新:侧栏重建 + (正在浏览它时)表格重填。
+
+        正在浏览时表格重填是为了让用户立刻看到新加的歌;浏览别处时
+        不动表格,避免打断。
+        """
+        self._rebuild_sidebar()
+        self._preload_local_playlist_covers()
+        context = self._table_context
+        if context is None or context.kind != "local-playlist":
+            return
+        if context.id != playlist.id:
+            return
+        self._set_table_songs(
+            self._local_playlist_songs(playlist), "netease", context
+        )
+
+    def _show_local_playlist(self, list_ref: _ListRef) -> None:
+        """点开本地歌单:直接用快照填表,零网络、零后台任务。"""
+        playlist = self._find_local_playlist(list_ref.id)
+        if playlist is None:
+            self.statusBar().showMessage(tr("local.missing"))
+            return
+        songs = self._local_playlist_songs(playlist)
+        # 表头固定用「歌手」版:本地歌单可混收两源,列语义是「作者」
+        self._set_table_songs(songs, "netease", list_ref)
+        self.statusBar().showMessage(
+            tr("list.loaded", title=list_ref.title, count=len(songs))
+        )
+
+    def _on_create_local_playlist_requested(self) -> None:
+        """分区头「+」与「新建歌单并添加」共用的一次取名流程。"""
+        name = self._ask_local_playlist_name()
+        if name is None:
+            return
+        self._create_local_playlist(name)
+
+    def _ask_local_playlist_name(self, title: str | None = None) -> str | None:
+        """弹一行输入取名;取消或空名返回 None(空名给状态栏提示)。"""
+        text, accepted = QInputDialog.getText(
+            self, title or tr("local.create_prompt"), tr("local.name_label")
+        )
+        if not accepted:
+            return None
+        cleaned = text.strip()
+        if not cleaned:
+            self.statusBar().showMessage(tr("local.name_empty"))
+            return None
+        return cleaned
+
+    def _set_local_playlist_cover(
+        self, playlist_id: int, cover_url: str
+    ) -> None:
+        """设置/清空歌单手动封面(空串即恢复自动封面)并落盘。"""
+        playlist = self._find_local_playlist(playlist_id)
+        if playlist is None:
+            return
+        playlist.cover_url = cover_url
+        self._save_local_playlists()
+        self._rebuild_sidebar()
+        if cover_url:
+            self.statusBar().showMessage(tr("local.cover_set", name=playlist.name))
+        else:
+            self.statusBar().showMessage(tr("local.cover_auto_set", name=playlist.name))
+        self._preload_local_playlist_covers()
+
+    # -- 侧栏歌单封面(M7) ----------------------------------------------------
+
+    # 侧栏图标格是 30x18,封面做成方图按 18px 高显示;圆角与表格缩略图同比例
+    _SIDEBAR_COVER_SIZE = 18
+    _SIDEBAR_COVER_RADIUS = 4
+
+    def _preload_local_playlist_covers(self) -> None:
+        """把全部本地歌单封面 URL 交给侧栏专用 loader 批量预取。
+
+        preload 语义是「再次调用即作废上一批」,所以每次都交全集;
+        磁盘缓存命中时不会触网,「启动后逐个亮起」由 5 线程池自然实现。
+        """
+        urls = [
+            local_playlist_cover_url(playlist)
+            for playlist in self._local_playlists
+        ]
+        self._sidebar_cover_urls = [url for url in urls if url]
+        self._sidebar_cover_loader.preload(self._sidebar_cover_urls)
+
+    def _on_sidebar_cover_ready(self, url: str, data: bytes) -> None:
+        """某张歌单封面字节到达:解码成圆角图标缓存,并刷新对应歌单项。"""
+        if url not in self._sidebar_cover_urls:
+            return  # 已换歌单封面/已无引用:过期回调丢弃
+        icon = self._sidebar_cover_icons.get(url)
+        if icon is None:
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(data):
+                return
+            dpr = self.sidebar.devicePixelRatioF()
+            physical = max(1, round(self._SIDEBAR_COVER_SIZE * dpr))
+            pixmap = rounded_pixmap(
+                pixmap, physical, max(1, round(self._SIDEBAR_COVER_RADIUS * dpr))
+            )
+            pixmap.setDevicePixelRatio(dpr)
+            icon = QIcon(pixmap)
+            self._sidebar_cover_icons[url] = icon
+        self._apply_local_playlist_icons()
+
+    def _apply_local_playlist_icons(self) -> None:
+        """封面到达后只刷本地歌单子节点图标,不整树重建。"""
+        header = self.sidebar.find_header("local")
+        if header is None:
+            return
+        for row in range(header.childCount()):
+            self._apply_item_icons(header.child(row))
+
+    # -- 侧栏右键菜单与手动封面 ------------------------------------------------
+
+    def _on_sidebar_context_menu(self, pos) -> None:
+        """侧栏右键:本地歌单可设封面 / 恢复自动封面(其余条目不弹菜单)。"""
+        item = self.sidebar.itemAt(pos)
+        if item is None:
+            return
+        role = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(role, tuple) or role[0] != "local-playlist":
+            return
+        playlist_id = role[1]
+        if not isinstance(playlist_id, int):
+            return
+        playlist = self._find_local_playlist(playlist_id)
+        if playlist is None:
+            return
+        menu = QMenu(self.sidebar)
+        cover_action = menu.addAction(tr("local.cover_menu"))
+        auto_action = menu.addAction(tr("local.cover_auto"))
+        # 没有手动封面时「使用自动封面」无意义,置灰但仍展示(可发现性)
+        auto_action.setEnabled(bool(playlist.cover_url))
+        cover_action.setEnabled(bool(playlist.items))
+        chosen = _exec_menu(menu, self.sidebar.viewport().mapToGlobal(pos))
+        if chosen is auto_action:
+            self._set_local_playlist_cover(playlist_id, "")
+        elif chosen is cover_action:
+            self._pick_local_playlist_cover(playlist)
+
+    def _pick_local_playlist_cover(self, playlist: LocalPlaylist) -> None:
+        """从歌单内已有歌曲的封面里选一张作为手动封面。"""
+        dialog = _CoverPickerDialog(playlist, self._sidebar_cover_loader, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        url = dialog.chosen_url()
+        if url:
+            self._set_local_playlist_cover(playlist.id, url)
 
     # -- 网易云歌单 -----------------------------------------------------------
 
@@ -1340,8 +2287,80 @@ class MainWindow(QMainWindow):
             tr("list.bili_folders_loaded", count=len(folders))
         )
 
+    # -- 酷狗歌单(M6) --------------------------------------------------------
+
+    def _load_kugou_playlists(self) -> None:
+        """拉取酷狗歌单列表(token 链)。未登录直接返回。"""
+        if self._kugou_account is None:
+            return
+
+        def fetch() -> object:
+            return self._kugou_client.get_user_playlists()
+
+        run_async(
+            fetch,
+            on_done=self._on_kugou_playlists_loaded,
+            on_error=self._on_kugou_playlists_error,
+        )
+
+    def _on_kugou_playlists_loaded(self, playlists) -> None:
+        if not isinstance(playlists, list):
+            return
+        # 套用分区内拖拽排序:已知歌单按存储序排前,新歌单追加尾部
+        self._kugou_playlists = self._apply_stored_order(
+            playlists, SETTING_KUGOU_PLAYLIST_ORDER, lambda p: p.listid
+        )
+        self._rebuild_sidebar()
+        self.statusBar().showMessage(
+            tr("list.kugou_loaded", count=len(playlists))
+        )
+
+    def _on_kugou_playlists_error(self, message: str) -> None:
+        # 登录失效走重登提示,其余按加载失败提示(不自动登出:
+        # 可能是网络抖动,清凭据会让用户白重扫一次)
+        if isinstance(message, str) and "登录" in message:
+            self.statusBar().showMessage(message)
+            return
+        self.statusBar().showMessage(
+            tr("list.kugou_failed", message=message)
+        )
+
+    def _load_kugou_playlist_tracks(self, list_ref: _ListRef) -> None:
+        """打开酷狗歌单:拉曲目并填表(只浏览,双击才起播)。"""
+        playlist = next(
+            (p for p in self._kugou_playlists if p.listid == list_ref.id), None
+        )
+        if playlist is None:
+            self.statusBar().showMessage(tr("kugou.playlist_missing"))
+            return
+        self._clear_table()
+        self.statusBar().showMessage(tr("list.loading", title=list_ref.title))
+
+        def fetch() -> object:
+            return self._kugou_client.get_playlist_tracks(playlist)
+
+        def on_done(songs) -> None:
+            if not isinstance(songs, list):
+                return
+            self._set_table_songs(
+                [_kugou_song_to_queue(song) for song in songs],
+                "kugou",
+                list_ref,
+            )
+            self.statusBar().showMessage(
+                tr("list.loaded", title=list_ref.title, count=len(songs))
+            )
+
+        def on_error(message: str) -> None:
+            self.statusBar().showMessage(
+                tr("list.kugou_tracks_failed", message=message)
+            )
+            if not self._table_songs:
+                self._empty_state.set_hint(tr("list.kugou_tracks_failed_hint"))
+
+        run_async(fetch, on_done=on_done, on_error=on_error)
+
     def _show_bili_items(self, items: list, list_ref: _ListRef) -> None:
-        """B站条目列表(收藏夹/稍后再看共用)填表;只浏览不换队列。"""
         playable = [item for item in items if item.playable]
         self._set_table_songs(
             [
@@ -1414,17 +2433,28 @@ class MainWindow(QMainWindow):
             )
         return tinted_icon(source)
 
-    def _add_header_item(
-        self, text: str, icon=None, kind: str | None = None
+    @staticmethod
+    def _make_header_item(
+        text: str, icon=None, kind: str | None = None
     ) -> QTreeWidgetItem:
-        """顶层分区头:启用但不可选中(注意不能用 NoItemFlags——禁用的父项
-        会让子节点无法成为 current/selected,折叠与拖拽都会失效)。"""
+        """构造顶层分区头但不挂载(M8 起顺序由 SETTING_SECTION_ORDER 决定)。
+
+        启用但不可选中(不能用 NoItemFlags——禁用的父项会让子节点无法成为
+        current/selected,折叠与拖拽都会失效)。
+        """
         item = QTreeWidgetItem([text])
         item.setFlags(Qt.ItemFlag.ItemIsEnabled)
         if kind is not None:
             item.setData(0, Qt.ItemDataRole.UserRole, (kind, None))
         if icon is not None:
             item.setIcon(0, icon)
+        return item
+
+    def _add_header_item(
+        self, text: str, icon=None, kind: str | None = None
+    ) -> QTreeWidgetItem:
+        """构造并立即挂载顶层分区头(保留给不需要排序的调用点)。"""
+        item = self._make_header_item(text, icon, kind)
         self.sidebar.addTopLevelItem(item)
         return item
 
@@ -1453,10 +2483,13 @@ class MainWindow(QMainWindow):
         search_item.setData(0, Qt.ItemDataRole.UserRole, ("search", None))
         self.sidebar.addTopLevelItem(search_item)
 
+        # 分区头先全部建好,最后按用户拖拽顺序统一挂载(M8):_add_header_item
+        # 内部会 addTopLevelItem,这里改用不挂载的构造,顺序由末尾决定。
+        recent_header: QTreeWidgetItem | None = None
         # 「最近」分区:跨平台聚合最近播放过的列表,非空才出现
         # (空分区只有占位噪音,首次起播后自然浮现)
         if self._recent:
-            recent_header = self._add_header_item(
+            recent_header = self._make_header_item(
                 tr("sidebar.recent"), None, "recent-header"
             )
             for ref in self._recent:
@@ -1470,7 +2503,7 @@ class MainWindow(QMainWindow):
                     (ref.kind, ref.id, ref.title),
                 )
 
-        netease_header = self._add_header_item(
+        netease_header = self._make_header_item(
             tr("sidebar.netease_playlists"),
             self._brand_header_icon("netease"), "netease-header",
         )
@@ -1493,8 +2526,9 @@ class MainWindow(QMainWindow):
                 )
 
         # 收藏的他人歌单:仅网易云已登录时展示(未登录整个分区不出现)
+        subscribed_header: QTreeWidgetItem | None = None
         if self._account is not None:
-            subscribed_header = self._add_header_item(
+            subscribed_header = self._make_header_item(
                 tr("sidebar.netease_subscribed"),
                 self._brand_header_icon("netease"), "netease-subscribed-header",
             )
@@ -1515,7 +2549,7 @@ class MainWindow(QMainWindow):
                     "netease-subscribed-loading", None, selectable=False,
                 )
 
-        bili_header = self._add_header_item(
+        bili_header = self._make_header_item(
             tr("sidebar.bili_folders"),
             self._brand_header_icon("bilibili"), "bili-header",
         )
@@ -1541,6 +2575,64 @@ class MainWindow(QMainWindow):
                     bili_header, tr("sidebar.loading_folders"),
                     "bili-loading", None, selectable=False,
                 )
+
+        # 酷狗(M6):未登录时与网易云/B站一致,只放一个登录入口
+        kugou_header = self._make_header_item(
+            tr("sidebar.kugou_playlists"), None, "kugou-header",
+        )
+        if self._kugou_account is None:
+            self._add_child_item(
+                kugou_header, tr("sidebar.kugou_login"), "kugou-login", None
+            )
+        else:
+            for playlist in self._kugou_playlists:
+                title = sanitize_ui_text(playlist.name)
+                if playlist.count:
+                    title = f"{title}({playlist.count})"
+                self._add_child_item(
+                    kugou_header, title, "kugou-playlist", playlist.listid
+                )
+            if not self._kugou_playlists:
+                self._add_child_item(
+                    kugou_header, tr("sidebar.loading_kugou"),
+                    "kugou-loading", None, selectable=False,
+                )
+
+        # 本地歌单(M7):始终出现(分区头右侧的「+」是新建入口,空分区
+        # 也必须有入口);子节点 payload 是裸 int,与其他平台歌单一致
+        local_header = self._make_header_item(
+            tr("sidebar.local_playlists"), None, "local-header",
+        )
+        for playlist in self._local_playlists:
+            title = sanitize_ui_text(playlist.name)
+            if playlist.items:
+                title = f"{title}({len(playlist.items)})"
+            self._add_child_item(
+                local_header, title, "local-playlist", playlist.id
+            )
+        if not self._local_playlists:
+            self._add_child_item(
+                local_header, tr("sidebar.local_empty_hint"),
+                "local-empty", None, selectable=False,
+            )
+
+        # M8:按用户拖拽顺序挂载分区头。「搜索」固定置顶、「设置」固定置底,
+        # 中间各分区顺序取自 section_order;配置里没有的新分区追加到尾部。
+        headers: dict[str, QTreeWidgetItem] = {"netease": netease_header,
+                                               "bili": bili_header,
+                                               "kugou": kugou_header,
+                                               "local": local_header}
+        if self._account is not None and subscribed_header is not None:
+            headers["netease-subscribed"] = subscribed_header
+        if recent_header is not None:
+            headers["recent"] = recent_header
+        ordered_sections = apply_section_order(
+            list(headers), self._settings.get(SETTING_SECTION_ORDER, [])
+        )
+        for section in ordered_sections:
+            header = headers.get(section)
+            if header is not None:
+                self.sidebar.addTopLevelItem(header)
 
         settings_item = QTreeWidgetItem([tr("sidebar.settings")])
         settings_item.setFlags(
@@ -1571,6 +2663,11 @@ class MainWindow(QMainWindow):
         "bili-login": "person",
         "bili-watchlater": "playlist_play",
         "bili-folder": "queue_music",
+        "kugou-login": "person",
+        "kugou-playlist": "library_music",
+        # 本地歌单默认图标;有封面时由 _apply_item_icons 换成封面缩略图
+        "local-playlist": "library_music",
+        "local-empty": "library_music",
     }
 
     _HEADER_BRAND = {
@@ -1595,6 +2692,22 @@ class MainWindow(QMainWindow):
             item.setIcon(
                 0, self._monochrome_header_icon("history", item.isExpanded())
             )
+        elif kind == "kugou-header":
+            # 「酷狗」分区头:暂无品牌标资产,单色标 + 折叠三角。
+            # 不能拿 "kugou" 调 _section_header_icon(会 KeyError,同 local)。
+            item.setIcon(
+                0, self._monochrome_header_icon("library_music", item.isExpanded())
+            )
+        elif kind == "local-header":
+            # 「本地歌单」分区头:同样无品牌标,单色标 + 折叠三角。
+            # 不能拿分区键 "local" 调 _section_header_icon(会去
+            # _SOFT_BRAND_COLORS 查品牌色并 KeyError)。
+            item.setIcon(
+                0, self._monochrome_header_icon("library_music", item.isExpanded())
+            )
+        elif kind == "local-playlist" and isinstance(role[1], int):
+            # 本地歌单:有(手动或自动)封面就用封面缩略图,否则回落单色标
+            item.setIcon(0, self._local_playlist_icon(role[1]))
         else:
             # 「最近」子节点按来源类型取图标(payload=(来源 kind, id, title))
             if kind == "recent-item" and isinstance(role[1], tuple):
@@ -1605,6 +2718,17 @@ class MainWindow(QMainWindow):
                 item.setIcon(0, tinted_icon(icon_name))
         for row in range(item.childCount()):
             self._apply_item_icons(item.child(row))
+
+    def _local_playlist_icon(self, playlist_id: int) -> QIcon:
+        """歌单侧栏图标:封面缩略图(已解码则复用),无封面回落单色标。"""
+        playlist = self._find_local_playlist(playlist_id)
+        if playlist is not None:
+            url = local_playlist_cover_url(playlist)
+            icon = self._sidebar_cover_icons.get(url) if url else None
+            if icon is not None:
+                return icon
+        return tinted_icon("library_music")
+
 
     def _sidebar_list_ref(self, kind: str, payload, item: QTreeWidgetItem) -> _ListRef:
         """侧栏条目 → _ListRef;标题取内存里的干净名字(侧栏文本带计数,
@@ -1624,6 +2748,14 @@ class MainWindow(QMainWindow):
                     return _ListRef(kind, entry_id, folder.title)
         elif kind == "bili-watchlater":
             return _ListRef("bili-watchlater", 0, tr("sidebar.watchlater"))
+        elif kind == "kugou-playlist":
+            for playlist in self._kugou_playlists:
+                if playlist.listid == entry_id:
+                    return _ListRef(kind, entry_id, playlist.name)
+        elif kind == "local-playlist":
+            playlist = self._find_local_playlist(entry_id)
+            if playlist is not None:
+                return _ListRef("local-playlist", entry_id, playlist.name)
         return _ListRef(kind, entry_id, item.text(0))
 
     def _open_list_ref(self, list_ref: _ListRef) -> None:
@@ -1639,6 +2771,11 @@ class MainWindow(QMainWindow):
             self._load_bili_folder_tracks(list_ref)
         elif list_ref.kind == "bili-watchlater":
             self._load_bili_watch_later(list_ref)
+        elif list_ref.kind == "kugou-playlist":
+            self._load_kugou_playlist_tracks(list_ref)
+        elif list_ref.kind == "local-playlist":
+            # 本地快照直接填表,不发任何网络请求
+            self._show_local_playlist(list_ref)
         elif list_ref.kind == "search":
             # 「最近」里的搜索条目回放:标题剥前缀还原关键词重搜
             self._open_search_page(
@@ -1673,6 +2810,18 @@ class MainWindow(QMainWindow):
             return
         if kind == "bili-watchlater":
             self._open_list_ref(self._sidebar_list_ref(kind, payload, item))
+            return
+        if kind == "local-playlist":
+            self._open_list_ref(self._sidebar_list_ref(kind, payload, item))
+            return
+        if kind == "kugou-playlist":
+            self._open_list_ref(self._sidebar_list_ref(kind, payload, item))
+            return
+        if kind == "kugou-login":
+            self.central_stack.setCurrentIndex(_PAGE_TABLE)
+            self._set_search_mode(False)
+            self._clear_table()
+            self._handle_kugou_section_click()
             return
         if kind == "recent-item":
             # payload = (来源 kind, id, 干净标题):按来源分发,加载失败
@@ -1775,8 +2924,24 @@ class MainWindow(QMainWindow):
         self._store.save_settings(self._settings)
         self._apply_item_icons(item)
 
+    def _on_section_order_changed(self, sections: list) -> None:
+        """分区头换序落库:存分区键序列,重建后顺序保持不变。
+
+        只存可排序分区(不含搜索/设置)。未知/非法值由 store 侧
+        validate_section_order 清洗,这里不做二次过滤。
+        """
+        if not isinstance(sections, list):
+            return
+        self._settings[SETTING_SECTION_ORDER] = list(sections)
+        self._store.save_settings(self._settings)
+
     def _on_sidebar_order_changed(self, section: str) -> None:
-        """分区内拖拽排序落库:读子节点顺序写设置键,并同步内存列表。"""
+        """分区内拖拽排序落库:读子节点顺序写设置键,并同步内存列表。
+
+        每个分区显式分支,不用 else 兜底:新增分区(如 M7 的 local)若
+        落进 B站分支,会拿收藏夹字典按歌单 id 建映射、写错设置键且
+        静默丢数据。
+        """
         ids = self.sidebar.section_child_ids(section)
         if section == "netease":
             setting = SETTING_NETEASE_PLAYLIST_ORDER
@@ -1784,9 +2949,18 @@ class MainWindow(QMainWindow):
         elif section == "netease-subscribed":
             setting = SETTING_NETEASE_SUBSCRIBED_ORDER
             by_id = {p.id: p for p in self._subscribed_playlists}
-        else:
+        elif section == "bili":
             setting = SETTING_BILI_FOLDER_ORDER
             by_id = {f.media_id: f for f in self._bili_folders}
+        elif section == "kugou":
+            # M6:酷狗歌单同样参与分区内拖拽排序
+            setting = SETTING_KUGOU_PLAYLIST_ORDER
+            by_id = {p.listid: p for p in self._kugou_playlists}
+        elif section == "local":
+            setting = SETTING_LOCAL_PLAYLIST_ORDER
+            by_id = {p.id: p for p in self._local_playlists}
+        else:
+            return  # 未知分区:不落库也不改内存
         self._settings[setting] = ids
         self._store.save_settings(self._settings)
         # 内存列表同步成相同顺序,后续 _rebuild_sidebar 不会回退到旧顺序
@@ -1796,8 +2970,13 @@ class MainWindow(QMainWindow):
                 self._playlists = ordered
             elif section == "netease-subscribed":
                 self._subscribed_playlists = ordered
-            else:
+            elif section == "bili":
                 self._bili_folders = ordered
+            elif section == "kugou":
+                self._kugou_playlists = ordered
+            else:
+                self._local_playlists = ordered
+
 
     def _apply_stored_order(self, items: list, setting: str, id_of) -> list:
         """加载后套用存储顺序:已知 id 按存储序排前、新条目追加尾部;
@@ -1831,14 +3010,20 @@ class MainWindow(QMainWindow):
     # -- 歌曲表 ---------------------------------------------------------------
 
     def _update_table_empty_state(self) -> None:
-        """表空时切到空态视图;文案按登录状态区分。"""
+        """表空时切到空态视图;文案按当前浏览上下文与登录状态区分。"""
         empty = self.song_table.rowCount() == 0
         self.table_stack.setCurrentIndex(1 if empty else 0)
-        if empty:
-            if self._account is None and self._bili_account is None:
-                self._empty_state.set_hint(tr("empty.not_logged_in"))
-            else:
-                self._empty_state.set_hint(tr("empty.pick_from_sidebar"))
+        if not empty:
+            return
+        context = self._table_context
+        if context is not None and context.kind == "local-playlist":
+            # 空本地歌单:提示加歌入口,而不是通用的「从左侧选择歌单」
+            self._empty_state.set_hint(tr("empty.local_playlist"))
+        elif self._account is None and self._bili_account is None:
+            self._empty_state.set_hint(tr("empty.not_logged_in"))
+        else:
+            self._empty_state.set_hint(tr("empty.pick_from_sidebar"))
+
 
     def _clear_table(self) -> None:
         """清空表格与浏览上下文(切列表/登出时的加载中状态)。"""
@@ -2036,17 +3221,19 @@ class MainWindow(QMainWindow):
         self._search_source = source
         self._search_netease_btn.setChecked(source == "netease")
         self._search_bili_btn.setChecked(source == "bili")
+        self._search_kugou_btn.setChecked(source == "kugou")
         self._update_source_indicator(animate=True)
         if self._search_keyword:
             self._run_search(self._search_keyword, reset=True)
 
     def _update_source_indicator(self, animate: bool = True) -> None:
         """指示线贴选中按钮、按文字宽居中(布局变化即时对位,切换时滑动)。"""
-        button = (
-            self._search_bili_btn
-            if self._search_source == "bili"
-            else self._search_netease_btn
-        )
+        # 三源查表:新增来源只改这一处,避免嵌套三元漏判
+        button = {
+            "netease": self._search_netease_btn,
+            "bili": self._search_bili_btn,
+            "kugou": self._search_kugou_btn,
+        }.get(self._search_source, self._search_netease_btn)
         text_width = button.fontMetrics().horizontalAdvance(button.text())
         line_width = max(24, min(button.width(), text_width + 28))
         self._source_bar.move_indicator(
@@ -2093,6 +3280,23 @@ class MainWindow(QMainWindow):
                     ],
                     "bili",
                     has_more,
+                )
+        elif source == "kugou":
+            def fetch() -> object:
+                return self._kugou_client.search_songs(
+                    keyword,
+                    limit=_SEARCH_PAGE_SIZE,
+                    offset=(page - 1) * _SEARCH_PAGE_SIZE,
+                )
+
+            def on_done(result) -> None:
+                if generation != self._search_generation:
+                    return
+                songs, total = result
+                self._apply_search_page(
+                    [_kugou_song_to_queue(song) for song in songs],
+                    "kugou",
+                    page * _SEARCH_PAGE_SIZE < total,
                 )
         else:
             def fetch() -> object:
@@ -2160,15 +3364,65 @@ class MainWindow(QMainWindow):
         self._play_at(row)
 
     def _on_table_context_menu(self, pos) -> None:
-        """歌曲表右键菜单:「下一首播放」(插到当前曲后,不动队列其余部分)。"""
+        """歌曲表右键菜单:「下一首播放」+「添加到…」本地歌单二级菜单。
+
+        本地歌单子项用 QAction.setData(歌单 id) 而不是闭包捕获:
+        menu.exec 只返回选中的 QAction,data() 可反查目标,测试也能从
+        action 直接读目标。
+        """
         row = self.song_table.indexAt(pos).row()
         if not (0 <= row < len(self._table_songs)):
             return
+        song = self._table_songs[row]
         menu = QMenu(self.song_table)
         play_next_action = menu.addAction(tr("play.play_next_menu"))
-        chosen = menu.exec(self.song_table.viewport().mapToGlobal(pos))
+        add_menu = menu.addMenu(tr("play.add_to_menu"))
+        playlist_actions, new_action = self._menu_local_playlist_actions(add_menu, song)
+        chosen = _exec_menu(menu, self.song_table.viewport().mapToGlobal(pos))
         if chosen is play_next_action:
             self._insert_next_from_table(row)
+        elif chosen is new_action:
+            self._create_local_playlist_and_add(song)
+        elif chosen in playlist_actions:
+            self._add_song_to_local_playlist(chosen.data(), song)
+
+    def _menu_local_playlist_actions(
+        self, menu: QMenu, song: QueueSong
+    ) -> tuple[list, object]:
+        """填充「添加到…」二级菜单;返回 (已有歌单动作列表, 新建并添加动作)。
+
+        已含该曲的歌单置灰并追加「(已在)」后缀,点之前就知道结果;
+        写入侧 _add_song_to_local_playlist 仍会再查一次重。
+        """
+        # 复用 LocalPlaylistItem.key 的判定(含音源私有标识),不要在这里
+        # 另写 (source, id) 比较:酷狗 id 恒为 0,那样会把不同歌判成重复
+        probe = LocalPlaylistItem(
+            source=song.source, id=song.id,
+            extra={"bvid": song.bvid} if song.bvid else {},
+        )
+        actions: list = []
+        for playlist in self._local_playlists:
+            already = any(item.key == probe.key for item in playlist.items)
+            label = sanitize_ui_text(playlist.name)
+            if already:
+                label = f"{label}{tr('local.already_tag')}"
+            action = menu.addAction(label)
+            action.setData(playlist.id)
+            action.setEnabled(not already)
+            actions.append(action)
+        if self._local_playlists:
+            menu.addSeparator()
+        new_action = menu.addAction(tr("play.add_to_new"))
+        return actions, new_action
+
+    def _create_local_playlist_and_add(self, song: QueueSong) -> None:
+        """「新建歌单并添加」:一次取名同时完成建单与加歌。"""
+        name = self._ask_local_playlist_name()
+        if name is None:
+            return
+        playlist = self._create_local_playlist(name)
+        if playlist is not None:
+            self._add_song_to_local_playlist(playlist.id, song)
 
     def _insert_next_from_table(self, row: int) -> None:
         song = self._table_songs[row]
@@ -2218,10 +3472,11 @@ class MainWindow(QMainWindow):
     def _resolve_song_context(self, song: QueueSong) -> _SongContext:
         """解析一首歌的播放上下文(网络部分):点歌起播与预取共用同一逻辑。
 
-        网易云走 resolve_playable_url(含音质设置回退链),B站走
-        resolve_audio_stream + 流请求头,构建 _start_play 所需的
-        rotator/headers/状态文案。登录失效与解析失败以异常抛出,
-        由调用方按各自策略处理(起播要提示,预取则静默吞掉)。
+        三源各自分派都在这里,新增音源必须加显式分支。尾部对未知 source
+        抛错,不能靠「默认当网易云」兜底,否则酷狗歌会被拿 song.id 当
+        网易云歌曲 id 去请求(见 docs/research/M6-integration-points.md §2.1)。
+        登录失效与解析失败以异常抛出,由调用方按各自策略处理
+        (起播要提示,预取则静默吞掉)。
         """
         # 音质偏好取读快照即可:设置只在 UI 线程经设置页写入,dict 读原子
         quality = self._settings.get(SETTING_PLAY_QUALITY, "lossless")
@@ -2242,6 +3497,14 @@ class MainWindow(QMainWindow):
                     title=song.title, quality=_bili_quality_suffix(stream),
                 ),
             )
+        if song.source == "kugou":
+            return self._resolve_kugou_context(song, quality)
+        if song.source == "netease":
+            return self._resolve_netease_context(song, quality)
+        raise ValueError(f"未知音源:{song.source}")
+
+    def _resolve_netease_context(self, song: QueueSong, quality: str) -> _SongContext:
+        """网易云播放上下文(从 _resolve_song_context 拆出,行为不变)。"""
         playable = self._client.resolve_playable_url(
             song.id, song.duration_ms, preferred_quality=quality
         )
@@ -2260,6 +3523,29 @@ class MainWindow(QMainWindow):
             rotator=BackupUrlRotator([playable.url]), headers=None, status=status
         )
 
+    def _resolve_kugou_context(self, song: QueueSong, quality: str) -> _SongContext:
+        """酷狗播放上下文。
+
+        酷狗歌曲标识是 hash / encode_album_audio_id 这类字符串,放不进
+        QueueSong.id(int),统一从 extra 取(见 _kugou_song_from_queue)。
+        播放地址有时效,每次现解析,不做持久缓存。
+        """
+        if self._kugou_client is None:
+            raise KugouApiError(tr("kugou.not_inited"))
+        kugou_song = _kugou_song_from_queue(song)
+        playable = self._kugou_client.resolve_playable_url(
+            kugou_song, preferred_quality=quality
+        )
+        return _SongContext(
+            rotator=BackupUrlRotator(playable.candidate_urls),
+            headers=None,
+            status=tr(
+                "play.playing",
+                title=song.title,
+                quality=kugou_quality_label(quality, playable.quality_key),
+            ),
+        )
+
     def _resolve_and_start(self, song: QueueSong, generation: int) -> None:
         """后台解析播放地址并起播(点歌与预取过期重解析共用)。
 
@@ -2268,13 +3554,19 @@ class MainWindow(QMainWindow):
         """
         if song.source == "bili":
             on_done = self._make_bili_play_done(song, generation)
+        elif song.source == "kugou":
+            on_done = self._make_kugou_play_done(song, generation)
         else:
             on_done = self._make_netease_play_done(song, generation)
 
         def resolve() -> tuple[str, object]:
             try:
                 return ("ok", self._resolve_song_context(song))
-            except (NeteaseAuthRequiredError, BiliAuthRequiredError):
+            except (NeteaseAuthRequiredError, BiliAuthRequiredError,
+                    KugouAuthRequiredError):
+                # 三源鉴权异常都要归到 "auth":否则酷狗的登录失效会被当成
+                # 普通播放失败,走自动跳歌而不是提示重登(见
+                # docs/research/M6-integration-points.md §2.1 的 A4)
                 return ("auth", "")
             except Exception as error:  # noqa: BLE001 - 边界处统一转消息
                 return ("error", str(error) or error.__class__.__name__)
@@ -2309,6 +3601,29 @@ class MainWindow(QMainWindow):
             kind, payload = result
             if kind == "auth":
                 self._handle_bili_stale_login(tr("bili.auth_expired_sidebar"))
+                return
+            if kind == "error":
+                self._handle_play_failure(song, payload)
+                return
+            self._start_play(song, payload.rotator, payload.headers, status=payload.status)
+
+        return on_done
+
+    def _make_kugou_play_done(self, song: QueueSong, generation: int):
+        """酷狗起播完成回调。
+
+        与网易云/B站的差异:酷狗的凭据失效分两种(见 M6 调研 §2.6),
+        提示语要能区分,否则用户不知道该重扫还是该重登网页:
+        - 歌单侧 token 失效 -> 提示重新扫码
+        - 播放侧 KuGoo 串缺失/失效 -> 提示重新做网页登录
+        """
+
+        def on_done(result) -> None:
+            if generation != self._resolve_generation:
+                return  # 过期请求:已被更新的点歌覆盖,结果作废
+            kind, payload = result
+            if kind == "auth":
+                self._handle_kugou_stale_login(tr("kugou.auth_expired"))
                 return
             if kind == "error":
                 self._handle_play_failure(song, payload)
