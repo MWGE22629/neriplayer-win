@@ -14,8 +14,13 @@ from neriplayer_win.data.store import (
     LocalPlaylist,
     LocalPlaylistItem,
     LocalStore,
+    delete_local_playlist,
     local_playlist_cover_url,
+    move_local_playlist_in_order,
+    move_local_playlist_item,
     next_local_playlist_id,
+    remove_local_playlist_item,
+    rename_local_playlist,
 )
 
 
@@ -429,3 +434,185 @@ class TestNextId:
             LocalPlaylist(id=2, name="B"),
         ]
         assert next_local_playlist_id(playlists) == 8
+
+
+class TestRename:
+    def _three(self):
+        return [
+            LocalPlaylist(id=1, name="A"),
+            LocalPlaylist(id=2, name="B"),
+            LocalPlaylist(id=3, name="C"),
+        ]
+
+    def test_rename_success_trims(self):
+        playlists = self._three()
+        assert rename_local_playlist(playlists, 2, "  新名  ") is True
+        assert playlists[1].name == "新名"
+        assert [p.name for p in playlists] == ["A", "新名", "C"]
+
+    def test_blank_name_rejected(self):
+        playlists = self._three()
+        for blank in ("", "   ", "\t\n"):
+            assert rename_local_playlist(playlists, 1, blank) is False, blank
+        assert playlists[0].name == "A"
+
+    def test_overlong_name_truncated_not_rejected(self):
+        playlists = self._three()
+        assert rename_local_playlist(playlists, 1, "名" * 300) is True
+        assert len(playlists[0].name) == LOCAL_PLAYLIST_NAME_MAX
+
+    def test_duplicate_with_other_playlist_rejected(self):
+        playlists = self._three()
+        assert rename_local_playlist(playlists, 1, "B") is False
+        assert rename_local_playlist(playlists, 1, "  B  ") is False
+        assert playlists[0].name == "A"
+
+    def test_same_as_own_name_rejected(self):
+        playlists = self._three()
+        assert rename_local_playlist(playlists, 1, "A") is False
+        assert rename_local_playlist(playlists, 1, "  A  ") is False
+
+    def test_missing_id_rejected(self):
+        playlists = self._three()
+        assert rename_local_playlist(playlists, 99, "X") is False
+        assert [p.name for p in playlists] == ["A", "B", "C"]
+
+    def test_empty_list_rejected(self):
+        assert rename_local_playlist([], 1, "X") is False
+
+
+class TestDelete:
+    def test_delete_middle_returns_object_and_keeps_order(self):
+        middle = LocalPlaylist(id=2, name="B")
+        playlists = [LocalPlaylist(id=1, name="A"), middle, LocalPlaylist(id=3, name="C")]
+        assert delete_local_playlist(playlists, 2) is middle
+        assert [p.id for p in playlists] == [1, 3]
+
+    def test_delete_first_and_last(self):
+        playlists = [
+            LocalPlaylist(id=1, name="A"),
+            LocalPlaylist(id=2, name="B"),
+            LocalPlaylist(id=3, name="C"),
+        ]
+        assert delete_local_playlist(playlists, 1).id == 1
+        assert delete_local_playlist(playlists, 3).id == 3
+        assert [p.id for p in playlists] == [2]
+
+    def test_delete_missing_keeps_list(self):
+        playlists = [LocalPlaylist(id=1, name="A"), LocalPlaylist(id=2, name="B")]
+        assert delete_local_playlist(playlists, 42) is None
+        assert [p.id for p in playlists] == [1, 2]
+
+
+class TestMoveInOrder:
+    def test_move_up(self):
+        assert move_local_playlist_in_order([1, 2, 3], 2, -1) == [2, 1, 3]
+
+    def test_move_down(self):
+        assert move_local_playlist_in_order([1, 2, 3], 2, 1) == [1, 3, 2]
+
+    def test_multi_step_within_range(self):
+        assert move_local_playlist_in_order([1, 2, 3, 4], 1, 2) == [2, 3, 1, 4]
+
+    def test_first_moving_up_out_of_range(self):
+        assert move_local_playlist_in_order([1, 2, 3], 1, -1) is None
+
+    def test_last_moving_down_out_of_range(self):
+        assert move_local_playlist_in_order([1, 2, 3], 3, 1) is None
+
+    def test_multi_step_beyond_end(self):
+        assert move_local_playlist_in_order([1, 2, 3], 1, 5) is None
+
+    def test_missing_id(self):
+        assert move_local_playlist_in_order([1, 2, 3], 9, 1) is None
+
+    def test_zero_delta(self):
+        assert move_local_playlist_in_order([1, 2, 3], 2, 0) is None
+
+    def test_empty_ids(self):
+        assert move_local_playlist_in_order([], 1, 1) is None
+
+    def test_input_not_mutated(self):
+        ids = [1, 2, 3]
+        result = move_local_playlist_in_order(ids, 1, 1)
+        assert result == [2, 1, 3]
+        assert ids == [1, 2, 3]
+        assert result is not ids
+
+
+class TestMoveItem:
+    def _playlist(self, count=3):
+        return LocalPlaylist(
+            id=1, name="A",
+            items=[_item(entry_id=i + 1, title=f"歌{i}") for i in range(count)],
+        )
+
+    def test_move_up(self):
+        playlist = self._playlist()
+        assert move_local_playlist_item(playlist, 1, 0) is True
+        assert [item.title for item in playlist.items] == ["歌1", "歌0", "歌2"]
+
+    def test_move_down(self):
+        playlist = self._playlist()
+        assert move_local_playlist_item(playlist, 0, 2) is True
+        assert [item.title for item in playlist.items] == ["歌1", "歌2", "歌0"]
+
+    def test_adjacent_down(self):
+        playlist = self._playlist()
+        assert move_local_playlist_item(playlist, 0, 1) is True
+        assert [item.title for item in playlist.items] == ["歌1", "歌0", "歌2"]
+
+    def test_same_index(self):
+        playlist = self._playlist()
+        assert move_local_playlist_item(playlist, 1, 1) is False
+        assert [item.title for item in playlist.items] == ["歌0", "歌1", "歌2"]
+
+    def test_out_of_range(self):
+        playlist = self._playlist()
+        for from_index, to_index in ((-1, 0), (3, 0), (0, -1), (0, 3), (5, 9)):
+            assert move_local_playlist_item(
+                playlist, from_index, to_index
+            ) is False, (from_index, to_index)
+        assert [item.title for item in playlist.items] == ["歌0", "歌1", "歌2"]
+
+    def test_empty_playlist(self):
+        playlist = self._playlist(0)
+        assert move_local_playlist_item(playlist, 0, 0) is False
+        assert move_local_playlist_item(playlist, 0, 1) is False
+        assert playlist.items == []
+
+
+class TestRemoveItem:
+    def test_remove_netease_item(self):
+        first, second = _item("netease", 7, "首"), _item("netease", 8, "次")
+        playlist = LocalPlaylist(id=1, name="A", items=[first, second])
+        assert remove_local_playlist_item(playlist, first.key) is first
+        assert playlist.items == [second]
+
+    def test_missing_key_returns_none(self):
+        playlist = LocalPlaylist(id=1, name="A", items=[_item("netease", 7)])
+        assert remove_local_playlist_item(playlist, ("netease", "99")) is None
+        assert len(playlist.items) == 1
+
+    def test_empty_playlist_returns_none(self):
+        playlist = LocalPlaylist(id=1, name="A")
+        assert remove_local_playlist_item(playlist, ("netease", "1")) is None
+
+    def test_kugou_items_distinguished_by_bvid(self):
+        """两首 id 都为 0 的酷狗歌:靠 extra["bvid"] 区分。"""
+        a = _item("kugou", 0, "酷狗A", extra={"bvid": "hash-a"})
+        b = _item("kugou", 0, "酷狗B", extra={"bvid": "hash-b"})
+        assert a.key != b.key
+        playlist = LocalPlaylist(id=1, name="K", items=[a, b])
+        removed = remove_local_playlist_item(playlist, ("kugou", "0:hash-b"))
+        assert removed is b
+        assert playlist.items == [a]
+        assert remove_local_playlist_item(playlist, ("kugou", "0:hash-b")) is None
+
+    def test_kugou_same_id_without_bvid_kept(self):
+        """不带 bvid 的 (source, id) 键不会误删带 bvid 的酷狗条目。"""
+        a = _item("kugou", 0, "酷狗A", extra={"bvid": "hash-a"})
+        playlist = LocalPlaylist(id=1, name="K", items=[a])
+        assert remove_local_playlist_item(playlist, ("kugou", "0")) is None
+        assert playlist.items == [a]
+

@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QPushButton,
     QStackedWidget,
     QSplitter,
@@ -110,8 +111,13 @@ from ..data.store import (
     LocalStore,
     apply_section_order,
     apply_stored_order,
+    delete_local_playlist,
     local_playlist_cover_url,
+    move_local_playlist_in_order,
+    move_local_playlist_item,
     next_local_playlist_id,
+    remove_local_playlist_item,
+    rename_local_playlist,
 )
 from .. import bootstamp
 from ..i18n import tr
@@ -576,6 +582,49 @@ class _CoverColumnDelegate(QStyledItemDelegate):
         )
 
 
+class _SongTable(QTableWidget):
+    """歌曲表:本地歌单上下文下支持整行拖拽调序。
+
+    真正的数据源是 LocalPlaylist.items(落盘顺序即列表顺序),表格只是
+    它的投影。因此搬行不交给 QTableWidget 的默认实现(默认会自己搬行,
+    搬完与内存顺序打架,还会在下次 _fill_song_table 时回退),这里只算出
+    (from_row, to_row) 发信号,由 MainWindow 改 items 后重填。但 accept 后
+    仍要调 super().dropEvent:与 _SidebarTree._accept_move 同理,基类对已
+    接受的事件不会再搬行,只置 dropEventMoved 拦住 startDrag 在 MoveAction
+    结束后对被拖行(仍选中)的 removeRows,否则拖完一行表格就少一行。
+    拒绝路径不调基类,避免默认搬行。
+
+    其余列表(网易云/B站/酷狗/搜索)是远端只读数据,不开拖放;
+    开关由 MainWindow._set_table_songs 按上下文设置。
+    """
+
+    # (from_row, to_row):to_row 为移动后应处的新下标
+    reorder_requested = Signal(int, int)
+
+    def dropEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        from_row = self.currentRow()
+        target = self.indexAt(event.position().toPoint())
+        if from_row < 0 or not target.isValid():
+            event.ignore()
+            return
+        if len(self.selectionModel().selectedRows()) > 1:
+            # 多选拖拽语义不明确:拒绝,避免只搬了当前行造成困惑
+            event.ignore()
+            return
+        to_row = target.row()
+        # 落点在该行下半即插到其后
+        rect = self.visualRect(target)
+        if rect.isValid() and event.position().toPoint().y() >= rect.center().y():
+            to_row += 1
+        if to_row > from_row:
+            to_row -= 1  # 摘除自身后,后方行索引整体前移一位
+        event.setDropAction(Qt.DropAction.MoveAction)
+        event.accept()
+        super().dropEvent(event)
+        if to_row != from_row:
+            self.reorder_requested.emit(from_row, to_row)
+
+
 class _SlideStack(QStackedWidget):
     """中央页面切换过渡(借鉴 A 端 Tab 转场「快出慢进」)。
 
@@ -832,10 +881,12 @@ class _SidebarTree(QTreeWidget):
 
     两层拖拽,语义分开:
 
-    - 子节点(歌单/收藏夹):只允许「同一分区内」移动。dropEvent 不交给 Qt
+    - 子节点(歌单/收藏夹):只允许「同一分区内」移动。搬移逻辑不交给 Qt
       默认实现(默认会把子节点挂成目标节点的子节点,产生意外嵌套),而是
       手动搬移;合法移动后发 order_changed(分区键),由 MainWindow 读子节点
       顺序落库。跨分区、空白处、登录占位、固定项(稍后再看)一律 ignore。
+      accept 后的事件要交回基类收尾(_accept_move),否则 Qt 会在拖放结束
+      后把被拖行从模型里删掉,详见 _accept_move 注释。
     - 分区头(大类):允许互相换序,拖到「搜索」或「设置」上则拒绝(这两个
       固定置顶/置底)。换序后发 section_order_changed(分区键序列)。
 
@@ -871,6 +922,9 @@ class _SidebarTree(QTreeWidget):
     _GRIP_HIT_WIDTH = 14
     _GRIP_DOT_RADIUS = 1.4
     _GRIP_DOT_GAP = 4.0
+    # 把手距条目左缘的留白:落在 QTreeWidget::item 的左侧内边距里
+    # (theme.py 给左侧留了 26px),既不压品牌图标,也不破坏各行左对齐
+    _GRIP_LEFT = 12
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -966,9 +1020,12 @@ class _SidebarTree(QTreeWidget):
         return headers
 
     def header_grip_rect(self, header: QTreeWidgetItem) -> QRect | None:
-        """某个分区头右侧「⋮」的命中区(视口坐标);不可见时返回 None。
+        """某个分区头左侧「⋮」的命中区(视口坐标);不可见时返回 None。
 
-        与「+」的算法同构:绘制与命中共用,窗口缩放自动跟随。
+        绘制与命中共用本函数,窗口缩放自动跟随。把手放在条目左缘的
+        内边距里(主题左 padding 已让出槽位),与右侧「+」不再抢同一段
+        空间:此前两者都按右边缘定位,本地歌单分区头上完全重叠,点把手
+        会弹出新建歌单对话框。
         「搜索」「设置」固定位置,不画把手,这里直接返回 None(绘制与命中
         都走本函数,拒绝一次即两处一致)。
         """
@@ -984,7 +1041,7 @@ class _SidebarTree(QTreeWidget):
         if width <= 0:
             return None
         return QRect(
-            self.viewport().width() - self._PLUS_RIGHT_MARGIN - width,
+            row.left() + self._GRIP_LEFT,
             visible.top(),
             width,
             visible.height(),
@@ -1072,9 +1129,32 @@ class _SidebarTree(QTreeWidget):
             self.viewport().update()
         super().leaveEvent(event)
 
+    def _accept_move(self, event: QDropEvent) -> None:
+        """接受一次内部移动并把事件交回基类收尾。
+
+        必须调 super().dropEvent:Qt 的 startDrag 在 drag->exec() 以
+        MoveAction 结束且 dropEventMoved 为 false 时,会对仍处于选中态
+        的被拖行执行 removeRows(分区头被删等于整个分区连同子节点从侧栏
+        消失)。而 dropEventMoved 只在 QTreeWidget 的 C++ 基类 dropEvent
+        里、看到事件已被 accept 时置位(源码注释明说这是为「已自行搬好
+        数据的子类」留的口子);基类对已接受的事件不会再搬数据,只置标志
+        并做 setState(NoState) 等收尾。本测试直构 QDropEvent 走不到
+        startDrag,offscreen 下 exec 也只返回 IgnoreAction,所以此坑
+        自动化测不出,只能靠这里的 super() 挡住。
+        拒绝路径不得调基类:未接受的事件会被基类按默认语义搬移(子节点
+        被挂成目标节点的子节点,产生意外嵌套)。
+        """
+        event.setDropAction(Qt.DropAction.MoveAction)
+        event.accept()
+        super().dropEvent(event)
+
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802 - Qt 命名
         selected = self.selectedItems()
         dragged = selected[0] if len(selected) == 1 else None
+        if dragged is None:
+            # 分区头在旧版本不可选中,selectedItems 取不到;回退 currentItem
+            # 保证拖拽起点始终有值(子节点单选时两者一致,不会取错)
+            dragged = self.currentItem()
         if dragged is None:
             event.ignore()
             return
@@ -1097,17 +1177,29 @@ class _SidebarTree(QTreeWidget):
             return
         if target is dragged:
             # 原地放置:接受事件但顺序无变化,不通知落库
-            event.setDropAction(Qt.DropAction.MoveAction)
-            event.accept()
+            self._accept_move(event)
             return
-        indicator = self.dropIndicatorPosition()
-        below = indicator != QAbstractItemView.DropIndicatorPosition.AboveItem
+        below = self._drop_inserts_below(event, target)
         self._move_child(dragged, target, below)
-        event.setDropAction(Qt.DropAction.MoveAction)
-        event.accept()
+        self._accept_move(event)
         section = _HEADER_SECTION.get(self.item_kind(dragged.parent()))
         if section is not None:
             self.order_changed.emit(section)
+
+    def _drop_inserts_below(
+        self, event: QDropEvent, target: QTreeWidgetItem
+    ) -> bool:
+        """落点插在 target 之前(False)还是之后(True)。
+
+        按光标落在该行的上半还是下半判定,不用 dropIndicatorPosition():
+        鼠标停在行中间三分之一时 Qt 报 OnItem(整行视为落点),旧逻辑把
+        OnItem 一律当成「之后」,于是「向上拖一格」是空操作。改为与行
+        中心比 y 后上下各半语义明确,分区头与子节点两条路径共用。
+        """
+        row = self.visualItemRect(target)
+        if not row.isValid():
+            return True
+        return event.position().toPoint().y() >= row.center().y()
 
     def _drop_header(self, event: QDropEvent, dragged: QTreeWidgetItem) -> None:
         """分区头换序:只允许在可排序分区之间移动。
@@ -1128,29 +1220,25 @@ class _SidebarTree(QTreeWidget):
         while target.parent() is not None:
             target = target.parent()
         if target is dragged:
-            event.setDropAction(Qt.DropAction.MoveAction)
-            event.accept()
+            self._accept_move(event)
             return
         target_section = _HEADER_SECTION.get(self.item_kind(target))
         if target_section is None:
             # 拖到「搜索」或「设置」上:拒绝(它们是固定位置)
             event.ignore()
             return
-        indicator = self.dropIndicatorPosition()
-        below = indicator != QAbstractItemView.DropIndicatorPosition.AboveItem
+        below = self._drop_inserts_below(event, target)
         old_index = self.indexOfTopLevelItem(dragged)
         new_index = self.indexOfTopLevelItem(target) + (1 if below else 0)
         if old_index < new_index:
             new_index -= 1
         if old_index == new_index:
-            event.setDropAction(Qt.DropAction.MoveAction)
-            event.accept()
+            self._accept_move(event)
             return
         self.takeTopLevelItem(old_index)
         self.insertTopLevelItem(new_index, dragged)
         self.setCurrentItem(dragged)
-        event.setDropAction(Qt.DropAction.MoveAction)
-        event.accept()
+        self._accept_move(event)
         self.section_order_changed.emit(
             [section for section, _item in self._sortable_headers()]
         )
@@ -1319,7 +1407,7 @@ class MainWindow(QMainWindow):
         self.login_page = LoginPage(self._client)
         self.login_page.login_succeeded.connect(self._on_login_succeeded)
 
-        self.song_table = QTableWidget(0, 5)
+        self.song_table = _SongTable(0, 5)
         self.song_table.setHorizontalHeaderLabels(_header_netease())
         header = self.song_table.horizontalHeader()
         # 序号列与封面列固定 50px(原序号列默认 100px 的一半),标题列 Stretch
@@ -1343,6 +1431,10 @@ class MainWindow(QMainWindow):
         self.song_table.verticalHeader().setVisible(False)
         self.song_table.setAlternatingRowColors(True)
         self.song_table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        # 本地歌单内拖拽调序(其余列表不开拖放,见 _set_table_songs)
+        self.song_table.reorder_requested.connect(
+            self._on_table_reorder_requested
+        )
         # 右键「下一首播放」(插播不换队列)
         self.song_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.song_table.customContextMenuRequested.connect(self._on_table_context_menu)
@@ -2133,7 +2225,12 @@ class MainWindow(QMainWindow):
     # -- 侧栏右键菜单与手动封面 ------------------------------------------------
 
     def _on_sidebar_context_menu(self, pos) -> None:
-        """侧栏右键:本地歌单可设封面 / 恢复自动封面(其余条目不弹菜单)。"""
+        """侧栏右键:本地歌单的管理菜单(封面 / 重命名 / 删除 / 上移下移)。
+
+        其余条目不弹菜单。三组之间加分隔符:封面、歌单实体、排序。
+        上移/下移给不想拖拽的用户一条确定可用的路径(把手不可拖时尤其
+        需要),首末项置灰。
+        """
         item = self.sidebar.itemAt(pos)
         if item is None:
             return
@@ -2152,11 +2249,156 @@ class MainWindow(QMainWindow):
         # 没有手动封面时「使用自动封面」无意义,置灰但仍展示(可发现性)
         auto_action.setEnabled(bool(playlist.cover_url))
         cover_action.setEnabled(bool(playlist.items))
+        menu.addSeparator()
+        rename_action = menu.addAction(tr("local.rename_menu"))
+        delete_action = menu.addAction(tr("local.delete_menu"))
+        menu.addSeparator()
+        up_action = menu.addAction(tr("local.move_up"))
+        down_action = menu.addAction(tr("local.move_down"))
+        order = [p.id for p in self._local_playlists]
+        position = order.index(playlist_id) if playlist_id in order else -1
+        up_action.setEnabled(position > 0)
+        down_action.setEnabled(0 <= position < len(order) - 1)
         chosen = _exec_menu(menu, self.sidebar.viewport().mapToGlobal(pos))
         if chosen is auto_action:
             self._set_local_playlist_cover(playlist_id, "")
         elif chosen is cover_action:
             self._pick_local_playlist_cover(playlist)
+        elif chosen is rename_action:
+            self._rename_local_playlist(playlist)
+        elif chosen is delete_action:
+            self._delete_local_playlist(playlist)
+        elif chosen is up_action:
+            self._move_local_playlist(playlist_id, -1)
+        elif chosen is down_action:
+            self._move_local_playlist(playlist_id, 1)
+
+    def _rename_local_playlist(self, playlist: LocalPlaylist) -> None:
+        """重命名:预填原名,空名/重名/同名由 store 侧判定后提示。"""
+        text, accepted = QInputDialog.getText(
+            self,
+            tr("local.rename_prompt"),
+            tr("local.name_label"),
+            text=sanitize_ui_text(playlist.name),
+        )
+        if not accepted:
+            return
+        cleaned = text.strip()
+        if not cleaned:
+            self.statusBar().showMessage(tr("local.name_empty"))
+            return
+        old_name = playlist.name
+        if not rename_local_playlist(self._local_playlists, playlist.id, cleaned):
+            if cleaned[:LOCAL_PLAYLIST_NAME_MAX] != old_name.strip():
+                # 没有改动的原因只可能是重名(空名/同名已在上方排除)
+                self.statusBar().showMessage(tr("local.name_taken"))
+            return
+        new_name = playlist.name
+        self._save_local_playlists()
+        self._retitle_local_playlist_refs(playlist.id, new_name)
+        self._rebuild_sidebar()
+        self.statusBar().showMessage(tr("local.renamed", name=new_name))
+
+    def _retitle_local_playlist_refs(self, playlist_id: int, title: str) -> None:
+        """改名后同步所有引用该歌单的 _ListRef 标题。
+
+        _ListRef 是 frozen dataclass,只能整体重建;表格/队列上下文与
+        「最近」栈里的标题都是快照,不同步会让状态栏与最近条目显示旧名。
+        """
+        def retitled(ref: _ListRef) -> _ListRef:
+            if ref.kind == "local-playlist" and ref.id == playlist_id:
+                return _ListRef(kind=ref.kind, id=ref.id, title=title)
+            return ref
+
+        if self._table_context is not None:
+            self._table_context = retitled(self._table_context)
+        if self._queue_context is not None:
+            self._queue_context = retitled(self._queue_context)
+        updated = [retitled(ref) for ref in self._recent]
+        if updated != self._recent:
+            self._recent = updated
+            self._settings[SETTING_RECENT_LISTS] = [
+                {"kind": ref.kind, "id": ref.id, "title": ref.title}
+                for ref in updated
+            ]
+            self._store.save_settings(self._settings)
+
+    def _delete_local_playlist(self, playlist: LocalPlaylist) -> None:
+        """删除本地歌单:二次确认后清掉歌单与全部引用它的状态。
+
+        引用清理缺一不可:排序键与最近栈残留会在 id 被复用(新建按
+        max(id)+1 分配)后指向新歌单;播放队列来源只解绑不停播,避免
+        打断正在听的歌。
+        """
+        answer = QMessageBox.question(
+            self,
+            tr("local.delete_menu"),
+            tr("local.delete_confirm", name=playlist.name, count=len(playlist.items)),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        name = playlist.name
+        if delete_local_playlist(self._local_playlists, playlist.id) is None:
+            return
+        self._save_local_playlists()
+        # 排序键:去掉该 id 并落盘(不清理会在 id 复用后指向新歌单)
+        self._settings[SETTING_LOCAL_PLAYLIST_ORDER] = [
+            p.id for p in self._local_playlists
+        ]
+        # 最近栈:剔除该歌单条目(否则点开会提示「歌单已不存在」)
+        remaining = [
+            ref for ref in self._recent
+            if not (ref.kind == "local-playlist" and ref.id == playlist.id)
+        ]
+        if remaining != self._recent:
+            self._recent = remaining
+            self._settings[SETTING_RECENT_LISTS] = [
+                {"kind": ref.kind, "id": ref.id, "title": ref.title}
+                for ref in remaining
+            ]
+        self._store.save_settings(self._settings)
+        # 侧栏封面缓存:URL 若被新歌单复用,残留 key 会让新回调被丢弃
+        for url in list(self._sidebar_cover_urls):
+            if url and url not in [
+                local_playlist_cover_url(p) for p in self._local_playlists
+            ]:
+                self._sidebar_cover_urls.remove(url)
+                self._sidebar_cover_icons.pop(url, None)
+        # 表格正在浏览它:清表回空态
+        if (
+            self._table_context is not None
+            and self._table_context.kind == "local-playlist"
+            and self._table_context.id == playlist.id
+        ):
+            self._clear_table()
+        # 队列来源是它:只解绑并标脏,不清空队列(不打断正在播放的歌)
+        if (
+            self._queue_context is not None
+            and self._queue_context.kind == "local-playlist"
+            and self._queue_context.id == playlist.id
+        ):
+            self._queue_context = None
+            self._queue_dirty = True
+        self._rebuild_sidebar()
+        self._preload_local_playlist_covers()
+        self.statusBar().showMessage(tr("local.deleted", name=name))
+
+    def _move_local_playlist(self, playlist_id: int, delta: int) -> None:
+        """侧栏右键上移/下移:与拖拽共用同一份顺序设置键。"""
+        order = move_local_playlist_in_order(
+            [p.id for p in self._local_playlists], playlist_id, delta
+        )
+        if order is None:
+            return
+        by_id = {p.id: p for p in self._local_playlists}
+        if len(by_id) != len(order):
+            return  # 与拖拽路径同款守卫:顺序表与内存不一致时不落库
+        self._local_playlists = [by_id[i] for i in order]
+        self._settings[SETTING_LOCAL_PLAYLIST_ORDER] = order
+        self._store.save_settings(self._settings)
+        self._rebuild_sidebar()
 
     def _pick_local_playlist_cover(self, playlist: LocalPlaylist) -> None:
         """从歌单内已有歌曲的封面里选一张作为手动封面。"""
@@ -2435,15 +2677,25 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _make_header_item(
-        text: str, icon=None, kind: str | None = None
+        text: str, icon=None, kind: str | None = None, sortable: bool = False
     ) -> QTreeWidgetItem:
         """构造顶层分区头但不挂载(M8 起顺序由 SETTING_SECTION_ORDER 决定)。
 
-        启用但不可选中(不能用 NoItemFlags——禁用的父项会让子节点无法成为
-        current/selected,折叠与拖拽都会失效)。
+        必须启用(不能用 NoItemFlags——禁用的父项会让子节点无法成为
+        current/selected,折叠与拖拽都会失效)。sortable 的分区头额外给
+        Selectable + DragEnabled:Qt 只对可选中项启动拖拽,实测仅给
+        DragEnabled 时 startDrag 从不触发。「搜索」「设置」固定位置,
+        保持不可选中也不可拖。
         """
         item = QTreeWidgetItem([text])
-        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        flags = Qt.ItemFlag.ItemIsEnabled
+        if sortable:
+            flags |= (
+                Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsDragEnabled
+                | Qt.ItemFlag.ItemIsDropEnabled
+            )
+        item.setFlags(flags)
         if kind is not None:
             item.setData(0, Qt.ItemDataRole.UserRole, (kind, None))
         if icon is not None:
@@ -2490,7 +2742,7 @@ class MainWindow(QMainWindow):
         # (空分区只有占位噪音,首次起播后自然浮现)
         if self._recent:
             recent_header = self._make_header_item(
-                tr("sidebar.recent"), None, "recent-header"
+                tr("sidebar.recent"), None, "recent-header", sortable=True
             )
             for ref in self._recent:
                 title = ref.title
@@ -2505,7 +2757,7 @@ class MainWindow(QMainWindow):
 
         netease_header = self._make_header_item(
             tr("sidebar.netease_playlists"),
-            self._brand_header_icon("netease"), "netease-header",
+            self._brand_header_icon("netease"), "netease-header", sortable=True,
         )
         if self._account is None:
             self._add_child_item(
@@ -2531,6 +2783,7 @@ class MainWindow(QMainWindow):
             subscribed_header = self._make_header_item(
                 tr("sidebar.netease_subscribed"),
                 self._brand_header_icon("netease"), "netease-subscribed-header",
+                sortable=True,
             )
             # 每日推荐:固定首位(与 B站稍后再看同策略,不参与拖拽排序)
             self._add_child_item(
@@ -2551,7 +2804,7 @@ class MainWindow(QMainWindow):
 
         bili_header = self._make_header_item(
             tr("sidebar.bili_folders"),
-            self._brand_header_icon("bilibili"), "bili-header",
+            self._brand_header_icon("bilibili"), "bili-header", sortable=True,
         )
         if self._bili_account is None:
             self._add_child_item(
@@ -2578,7 +2831,7 @@ class MainWindow(QMainWindow):
 
         # 酷狗(M6):未登录时与网易云/B站一致,只放一个登录入口
         kugou_header = self._make_header_item(
-            tr("sidebar.kugou_playlists"), None, "kugou-header",
+            tr("sidebar.kugou_playlists"), None, "kugou-header", sortable=True,
         )
         if self._kugou_account is None:
             self._add_child_item(
@@ -2601,7 +2854,7 @@ class MainWindow(QMainWindow):
         # 本地歌单(M7):始终出现(分区头右侧的「+」是新建入口,空分区
         # 也必须有入口);子节点 payload 是裸 int,与其他平台歌单一致
         local_header = self._make_header_item(
-            tr("sidebar.local_playlists"), None, "local-header",
+            tr("sidebar.local_playlists"), None, "local-header", sortable=True,
         )
         for playlist in self._local_playlists:
             title = sanitize_ui_text(playlist.name)
@@ -2788,6 +3041,10 @@ class MainWindow(QMainWindow):
         # 分区头:单击切换折叠/展开并持久化
         if item.parent() is None and kind in _HEADER_SECTION:
             self._toggle_sidebar_section(item)
+            # 分区头为可拖换序必须可选中(M8),但选中态对它是噪音:
+            # 它只承载折叠,不像子节点那样表示「当前浏览的是谁」。
+            # 拖拽由按下后移动触发,清选中不影响。
+            self.sidebar.clearSelection()
             return
         if kind == "settings":
             self.central_stack.setCurrentIndex(_PAGE_SETTINGS)
@@ -3045,7 +3302,28 @@ class MainWindow(QMainWindow):
         self._table_header_source = header_source
         self._table_songs = songs
         self._table_context = context
+        self._apply_table_drag_mode(context)
         self._fill_song_table()
+
+    def _apply_table_drag_mode(self, context: _ListRef | None) -> None:
+        """只有本地歌单可拖拽调序。
+
+        远端列表(网易云/B站/酷狗/搜索)的内容顺序由接口决定,不能拖;
+        本地歌单的 items 顺序就是用户意图,拖完落盘。开关放在
+        _set_table_songs 里,所有填表路径(点开/刷新/搜索)自动一致。
+        """
+        editable = context is not None and context.kind == "local-playlist"
+        mode = (
+            QAbstractItemView.DragDropMode.InternalMove
+            if editable
+            else QAbstractItemView.DragDropMode.NoDragDrop
+        )
+        self.song_table.setDragDropMode(mode)
+        self.song_table.setDragEnabled(editable)
+        self.song_table.setAcceptDrops(editable)
+        self.song_table.setDropIndicatorShown(editable)
+        if editable:
+            self.song_table.setDefaultDropAction(Qt.DropAction.MoveAction)
 
     def _fill_song_table(self) -> None:
         songs = self._table_songs
@@ -3111,16 +3389,20 @@ class MainWindow(QMainWindow):
     # -- 正在播放均衡器指示 ---------------------------------------------------
 
     def _update_playing_row(self) -> None:
-        """当前播放曲在表中的行号(source+id 匹配;不在当前表为 None)。"""
+        """当前播放曲在表中的行号(按 QueueSong.key 匹配;不在当前表为 None)。
+
+        匹配必须走 key 而非 (source, id):酷狗歌曲 id 恒 0、真实标识在
+        bvid,同表两首酷狗歌按 (source, id) 会同时命中,排序后高亮跳行。
+        """
         active = self._active
         row = None
         if active is not None:
-            song = active.song
+            song_key = active.song.key
             row = next(
                 (
                     r
                     for r, item in enumerate(self._table_songs)
-                    if item.source == song.source and item.id == song.id
+                    if item.key == song_key
                 ),
                 None,
             )
@@ -3369,6 +3651,9 @@ class MainWindow(QMainWindow):
         本地歌单子项用 QAction.setData(歌单 id) 而不是闭包捕获:
         menu.exec 只返回选中的 QAction,data() 可反查目标,测试也能从
         action 直接读目标。
+
+        浏览本地歌单时追加「从歌单移除」:该列表的内容是用户自己维护的,
+        才有「移除」语义;远端歌单的内容不由本应用掌管,不出现此项。
         """
         row = self.song_table.indexAt(pos).row()
         if not (0 <= row < len(self._table_songs)):
@@ -3378,6 +3663,11 @@ class MainWindow(QMainWindow):
         play_next_action = menu.addAction(tr("play.play_next_menu"))
         add_menu = menu.addMenu(tr("play.add_to_menu"))
         playlist_actions, new_action = self._menu_local_playlist_actions(add_menu, song)
+        remove_action = None
+        context = self._table_context
+        if context is not None and context.kind == "local-playlist":
+            menu.addSeparator()
+            remove_action = menu.addAction(tr("local.remove_menu"))
         chosen = _exec_menu(menu, self.song_table.viewport().mapToGlobal(pos))
         if chosen is play_next_action:
             self._insert_next_from_table(row)
@@ -3385,6 +3675,52 @@ class MainWindow(QMainWindow):
             self._create_local_playlist_and_add(song)
         elif chosen in playlist_actions:
             self._add_song_to_local_playlist(chosen.data(), song)
+        elif remove_action is not None and chosen is remove_action:
+            self._remove_song_from_local_playlist(context.id, song)
+
+    def _on_table_reorder_requested(self, from_row: int, to_row: int) -> None:
+        """本地歌单内拖拽调序:改 items 顺序 → 落盘 → 重填表格。
+
+        _queue_dirty 必须置真:双击起播时只有「上下文不同或脏」才重装
+        队列(_play_from_table),否则会按新行号去播旧顺序的歌。
+        """
+        context = self._table_context
+        if context is None or context.kind != "local-playlist":
+            return
+        playlist = self._find_local_playlist(context.id)
+        if playlist is None:
+            return
+        if not move_local_playlist_item(playlist, from_row, to_row):
+            return
+        self._save_local_playlists()
+        self._queue_dirty = True
+        # 走统一刷新:侧栏条数/自动封面与表格行序一起更新
+        self._refresh_local_playlist_views(playlist)
+
+    def _remove_song_from_local_playlist(
+        self, playlist_id: int, song: QueueSong
+    ) -> None:
+        """从本地歌单移除一首歌:按 LocalPlaylistItem.key 定位后落盘。
+
+        必须走 key(而非 (source, id)):酷狗歌曲 id 恒为 0,真实标识在
+        extra["bvid"] 里,只比 id 会删错歌。
+        """
+        playlist = self._find_local_playlist(playlist_id)
+        if playlist is None:
+            return
+        probe = LocalPlaylistItem(
+            source=song.source,
+            id=song.id,
+            extra={"bvid": song.bvid} if song.bvid else {},
+        )
+        if remove_local_playlist_item(playlist, probe.key) is None:
+            return
+        self._save_local_playlists()
+        self._queue_dirty = True
+        self._refresh_local_playlist_views(playlist)
+        self.statusBar().showMessage(
+            tr("local.removed", playlist=playlist.name, title=song.title)
+        )
 
     def _menu_local_playlist_actions(
         self, menu: QMenu, song: QueueSong

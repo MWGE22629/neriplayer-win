@@ -106,9 +106,10 @@ class TestSidebarTreeStructure:
             assert bili.child(0).data(0, _ROLE) == ("bili-login", None)
             assert kugou.childCount() == 1
             assert kugou.child(0).data(0, _ROLE) == ("kugou-login", None)
-            # 分区头启用但不可选中(禁用父项会让子节点无法选中,故不能 NoItemFlags)
-            assert not netease.flags() & Qt.ItemFlag.ItemIsSelectable
+            # 分区头启用且可选中/可拖(M8 拖拽换序需要;禁用会让子节点无法选中)
             assert netease.flags() & Qt.ItemFlag.ItemIsEnabled
+            assert netease.flags() & Qt.ItemFlag.ItemIsSelectable
+            assert netease.flags() & Qt.ItemFlag.ItemIsDragEnabled
             # 默认全展开
             assert netease.isExpanded() and bili.isExpanded()
         finally:
@@ -1573,3 +1574,155 @@ class TestRecentMaxSetting:
             assert window.settings_page.recent_max_spin.value() == 8
         finally:
             _close(window)
+
+
+def _sortable_tree(qapp):
+    """分区头带 sortable 旗标的独立树(与 _make_header_item(sortable=True)
+    同旗标):头部拖拽路径只有可选中头部才走得通,镜像生产配置。"""
+    tree = _SidebarTree()
+    netease = MainWindow._make_header_item(
+        "网易云 · 歌单", None, "netease-header", sortable=True
+    )
+    tree.addTopLevelItem(netease)
+    for pid in (1, 2, 3):
+        child = QTreeWidgetItem(netease, [f"歌单{pid}"])
+        child.setData(0, _ROLE, ("netease-playlist", pid))
+    bili = MainWindow._make_header_item(
+        "B站 · 收藏夹", None, "bili-header", sortable=True
+    )
+    tree.addTopLevelItem(bili)
+    b_child = QTreeWidgetItem(bili, ["收藏夹"])
+    b_child.setData(0, _ROLE, ("bili-folder", 9))
+    settings = MainWindow._make_header_item("设置", None, "settings")
+    tree.addTopLevelItem(settings)
+    netease.setExpanded(True)
+    bili.setExpanded(True)
+    tree.resize(240, 400)
+    tree.show()
+    qapp.processEvents()
+    return tree
+
+
+def _drop_at(tree: _SidebarTree, target: QTreeWidgetItem, below: bool) -> QDropEvent:
+    """在 target 的下半/上半构造 dropEvent(半区判定由 _drop_inserts_below
+    按行中心划界,直构事件绕开 dragMove,与真实拖放同入口)。"""
+    row = tree.visualItemRect(target)
+    y = row.center().y() + row.height() // 4 if below else row.top() + row.height() // 4
+    point = QPointF(row.center().x(), y)
+    event = QDropEvent(
+        point,
+        Qt.DropAction.MoveAction,
+        QMimeData(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    tree.dropEvent(event)
+    return event
+
+
+def _top_item_of_kind(tree: _SidebarTree, kind: str) -> QTreeWidgetItem:
+    """按 kind 找顶层项。注意 find_header 只认 "xxx-header" 形态的分区键,
+    「设置」的 kind 是 "settings",要用本函数拿。"""
+    for i in range(tree.topLevelItemCount()):
+        item = tree.topLevelItem(i)
+        if tree.item_kind(item) == kind:
+            return item
+    raise AssertionError(f"top-level item of kind {kind} not found")
+
+
+class TestSidebarHeaderDrop:
+    def test_drop_below_other_header_reorders_and_emits(self, qapp):
+        tree = _sortable_tree(qapp)
+        received: list[list[str]] = []
+        tree.section_order_changed.connect(received.append)
+        tree.setCurrentItem(tree.find_header("netease"))
+        event = _drop_at(tree, tree.find_header("bili"), below=True)
+        accepted = event.isAccepted()
+        assert accepted
+        # 顶层仍是两分区头 + 设置,子节点一个不少(拖后分区不得消失)
+        assert tree.topLevelItemCount() == 3
+        assert tree.section_child_ids("netease") == [1, 2, 3]
+        assert tree.section_child_ids("bili") == [9]
+        assert [tree.item_kind(tree.topLevelItem(i)) for i in range(3)] == [
+            "bili-header",
+            "netease-header",
+            "settings",
+        ]
+        assert received == [["bili", "netease"]]
+
+    def test_drop_above_other_header(self, qapp):
+        tree = _sortable_tree(qapp)
+        netease = tree.find_header("netease")
+        bili = tree.find_header("bili")
+        tree.setCurrentItem(bili)
+        event = _drop_at(tree, netease, below=False)
+        accepted = event.isAccepted()
+        assert accepted
+        assert [tree.item_kind(tree.topLevelItem(i)) for i in range(3)] == [
+            "bili-header",
+            "netease-header",
+            "settings",
+        ]
+
+    def test_drop_on_self_accepted_without_signal(self, qapp):
+        tree = _sortable_tree(qapp)
+        received: list[list[str]] = []
+        tree.section_order_changed.connect(received.append)
+        netease = tree.find_header("netease")
+        tree.setCurrentItem(netease)
+        event = _drop_at(tree, netease, below=True)
+        accepted = event.isAccepted()
+        assert accepted
+        assert received == []
+        assert [tree.item_kind(tree.topLevelItem(i)) for i in range(3)] == [
+            "netease-header",
+            "bili-header",
+            "settings",
+        ]
+
+    def test_drop_on_settings_rejected(self, qapp):
+        tree = _sortable_tree(qapp)
+        tree.setCurrentItem(tree.find_header("netease"))
+        settings = _top_item_of_kind(tree, "settings")
+        event = _drop_at(tree, settings, below=True)
+        accepted = event.isAccepted()
+        assert not accepted
+        assert tree.topLevelItemCount() == 3
+
+    def test_dragging_settings_rejected(self, qapp):
+        tree = _sortable_tree(qapp)
+        settings = _top_item_of_kind(tree, "settings")
+        tree.setCurrentItem(settings)
+        event = _drop_at(tree, tree.find_header("bili"), below=True)
+        accepted = event.isAccepted()
+        assert not accepted
+        assert [tree.item_kind(tree.topLevelItem(i)) for i in range(3)] == [
+            "netease-header",
+            "bili-header",
+            "settings",
+        ]
+
+    def test_drop_onto_child_resolves_to_its_section_header(self, qapp):
+        tree = _sortable_tree(qapp)
+        tree.setCurrentItem(tree.find_header("netease"))
+        b_child = tree.find_header("bili").child(0)
+        event = _drop_at(tree, b_child, below=True)
+        accepted = event.isAccepted()
+        assert accepted
+        assert [tree.item_kind(tree.topLevelItem(i)) for i in range(3)] == [
+            "bili-header",
+            "netease-header",
+            "settings",
+        ]
+        # 落点是子节点本身不动,分区头换序不吞子节点
+        assert tree.section_child_ids("bili") == [9]
+
+    def test_child_drop_upper_half_inserts_before(self, qapp):
+        tree = _sortable_tree(qapp)
+        header = tree.find_header("netease")
+        p1, _p2, p3 = (header.child(i) for i in range(3))
+        tree.setCurrentItem(p3)
+        event = _drop_at(tree, p1, below=False)
+        accepted = event.isAccepted()
+        assert accepted
+        assert tree.section_child_ids("netease") == [3, 1, 2]

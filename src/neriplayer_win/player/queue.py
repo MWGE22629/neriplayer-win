@@ -59,13 +59,26 @@ _MODE_BUTTON_KEY = {
 class QueueSong:
     """统一队列条目:网易云歌曲与B站视频(收藏夹条目)同构。"""
 
-    source: str  # "netease" | "bili"
-    id: int  # 网易云 song id / B站 avid
-    bvid: str  # B站 only
+    source: str  # "netease" | "bili" | "kugou"
+    id: int  # 网易云 song id / B站 avid;酷狗恒 0(见 key)
+    bvid: str  # B站视频标识;酷狗存 "hash|encode_album_audio_id|album_id"
     title: str
     artist: str  # 歌手 / UP主
     duration_ms: int
     cover_url: str = ""  # 封面原图 URL(播放条按 CDN 规则换低清版)
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """跨表匹配键:并置 (source, id) 与 bvid。
+
+        酷狗歌曲的 id 恒为 0(真实标识是字符串,全在 bvid),只比
+        (source, id) 会把任意两首酷狗歌判成同一首,播放行高亮就会
+        同时命中/跳错行。语义与 LocalPlaylistItem.key 对齐(那边把
+        bvid 存在 extra 里)。网易云 bvid 为空串,键退化为 (source, id)。
+        """
+        if self.bvid:
+            return (self.source, f"{self.id}:{self.bvid}")
+        return (self.source, str(self.id))
 
 
 class PlayQueue(QObject):

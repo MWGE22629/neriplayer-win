@@ -356,6 +356,34 @@ class TestNowPlayingBars:
         finally:
             _close(window)
 
+    def test_kugou_rows_disambiguated_by_key(self, qapp, monkeypatch, tmp_path):
+        """两首酷狗歌 id 都是 0,高亮必须按 bvid 区分,落在真正在播的行。
+
+        修复前按 (source, id) 匹配,next() 恒命中第 0 行;排序/调序后
+        表现为高亮跳错行。
+        """
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            songs = [
+                QueueSong(
+                    source="kugou", id=0, bvid=f"hash{i}|ea{i}|al{i}",
+                    title=f"酷狗{i}", artist="测试", duration_ms=60000,
+                )
+                for i in range(2)
+            ]
+            window._set_table_songs(songs, "kugou", None)
+            window._active = main_window_module._ActivePlay(
+                song=songs[1], rotator=BackupUrlRotator(["http://x"]), headers=None
+            )
+            window._update_playing_row()
+            assert window._eq_state.row == 1
+            # 调序后(第二首挪到最前)行号跟随真实条目
+            songs.insert(0, songs.pop())
+            window._set_table_songs(songs, "kugou", None)
+            assert window._eq_state.row == 0
+        finally:
+            _close(window)
+
     def test_playing_state_drives_level_and_timer(self, qapp, monkeypatch, tmp_path):
         window = _make_window(qapp, monkeypatch, tmp_path)
         try:

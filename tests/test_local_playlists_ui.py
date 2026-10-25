@@ -96,9 +96,10 @@ class TestLocalSection:
             assert header is not None
             assert header.text(0) == "本地歌单"
             assert not header.icon(0).isNull()
-            # 分区头启用但不可选中(与其他分区一致)
+            # 分区头启用且可选中/可拖(与其余可排序分区一致)
             assert header.flags() & Qt.ItemFlag.ItemIsEnabled
-            assert not header.flags() & Qt.ItemFlag.ItemIsSelectable
+            assert header.flags() & Qt.ItemFlag.ItemIsSelectable
+            assert header.flags() & Qt.ItemFlag.ItemIsDragEnabled
             # 空分区给一行不可选提示
             assert _header_child_roles(window) == [("local-empty", None)]
             assert not (
@@ -888,3 +889,403 @@ class TestSidebarTreeLocalSection:
         assert _SidebarTree.section_of(child) == "local"
         assert tree.section_child_ids("local") == [3]
         tree.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# 歌单管理:重命名 / 删除 / 上移下移 / 歌曲调序与移除
+# ---------------------------------------------------------------------------
+
+def _menu_labels(monkeypatch, window, item) -> list[str]:
+    """捕获侧栏右键菜单项文案,不真正弹出模态菜单。"""
+    captured: dict[str, list[str]] = {}
+
+    def fake_exec(menu, _global_pos):
+        captured["labels"] = [a.text() for a in menu.actions()]
+        captured["actions"] = list(menu.actions())
+        return None
+
+    monkeypatch.setattr(main_window_module, "_exec_menu", fake_exec)
+    window._on_sidebar_context_menu(window.sidebar.visualItemRect(item).center())
+    return captured["labels"]
+
+
+class TestPlaylistManagement:
+    def test_context_menu_has_management_items(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        _write_playlists(
+            tmp_path,
+            [LocalPlaylist(id=1, name="A"), LocalPlaylist(id=2, name="B")],
+        )
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            labels = _menu_labels(monkeypatch, window, _local_header(window).child(0))
+            assert "重命名…" in labels
+            assert "删除歌单…" in labels
+            assert "上移" in labels
+            assert "下移" in labels
+        finally:
+            _close(window)
+
+    def test_move_up_down_persists(self, qapp, monkeypatch, tmp_path):
+        _write_playlists(
+            tmp_path,
+            [
+                LocalPlaylist(id=1, name="A"),
+                LocalPlaylist(id=2, name="B"),
+                LocalPlaylist(id=3, name="C"),
+            ],
+        )
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._move_local_playlist(3, -1)
+            assert [p.id for p in window._local_playlists] == [1, 3, 2]
+            stored = json.loads(
+                (tmp_path / "settings.json").read_text(encoding="utf-8")
+            )
+            assert stored["local_playlist_order"] == [1, 3, 2]
+            assert window.sidebar.section_child_ids("local") == [1, 3, 2]
+            # 首项再上移是空操作(不写坏顺序)
+            window._move_local_playlist(1, -1)
+            assert [p.id for p in window._local_playlists] == [1, 3, 2]
+        finally:
+            _close(window)
+
+    def test_rename_persists_and_rejects_duplicate(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        _write_playlists(
+            tmp_path,
+            [LocalPlaylist(id=1, name="A"), LocalPlaylist(id=2, name="B")],
+        )
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            monkeypatch.setattr(
+                main_window_module.QInputDialog,
+                "getText",
+                staticmethod(lambda *a, **k: ("夜跑", True)),
+            )
+            window._rename_local_playlist(window._find_local_playlist(1))
+            assert window._find_local_playlist(1).name == "夜跑"
+            stored = window._store.load_local_playlists()
+            assert [p.name for p in stored] == ["夜跑", "B"]
+            # 与另一歌单重名被拒
+            monkeypatch.setattr(
+                main_window_module.QInputDialog,
+                "getText",
+                staticmethod(lambda *a, **k: ("B", True)),
+            )
+            window._rename_local_playlist(window._find_local_playlist(1))
+            assert window._find_local_playlist(1).name == "夜跑"
+            assert "同名" in window.statusBar().currentMessage()
+        finally:
+            _close(window)
+
+    def test_rename_retitles_recent_and_table_context(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        _write_playlists(tmp_path, [LocalPlaylist(id=1, name="A")])
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._show_local_playlist(_ListRef("local-playlist", 1, "A"))
+            window._queue_context = _ListRef("local-playlist", 1, "A")
+            window._recent = [_ListRef("local-playlist", 1, "A")]
+            monkeypatch.setattr(
+                main_window_module.QInputDialog,
+                "getText",
+                staticmethod(lambda *a, **k: ("新名", True)),
+            )
+            window._rename_local_playlist(window._find_local_playlist(1))
+            assert window._table_context.title == "新名"
+            assert window._queue_context.title == "新名"
+            assert [r.title for r in window._recent] == ["新名"]
+            stored = json.loads(
+                (tmp_path / "settings.json").read_text(encoding="utf-8")
+            )
+            assert stored["recent_lists"][0]["title"] == "新名"
+        finally:
+            _close(window)
+
+    def test_delete_cleans_all_references(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        _write_playlists(
+            tmp_path,
+            [
+                LocalPlaylist(
+                    id=1, name="A",
+                    items=[
+                        LocalPlaylistItem(
+                            source="netease", id=11, title="x",
+                            cover_url="http://cover/1.jpg",
+                        )
+                    ],
+                ),
+                LocalPlaylist(id=2, name="B"),
+            ],
+        )
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._show_local_playlist(_ListRef("local-playlist", 1, "A"))
+            window._queue_context = _ListRef("local-playlist", 1, "A")
+            window._recent = [
+                _ListRef("local-playlist", 1, "A"),
+                _ListRef("netease-playlist", 9, "远端"),
+            ]
+            monkeypatch.setattr(
+                main_window_module.QMessageBox,
+                "question",
+                staticmethod(
+                    lambda *a, **k: main_window_module.QMessageBox.StandardButton.Yes
+                ),
+            )
+            window._delete_local_playlist(window._find_local_playlist(1))
+
+            assert [p.id for p in window._local_playlists] == [2]
+            # 歌单文件
+            assert [p.id for p in window._store.load_local_playlists()] == [2]
+            # 排序键
+            stored = json.loads(
+                (tmp_path / "settings.json").read_text(encoding="utf-8")
+            )
+            assert stored["local_playlist_order"] == [2]
+            # 最近栈
+            assert [(r.kind, r.id) for r in window._recent] == [
+                ("netease-playlist", 9)
+            ]
+            # 表格上下文清空
+            assert window._table_context is None
+            assert window.song_table.rowCount() == 0
+            # 队列只解绑,不清空(不打断播放)
+            assert window._queue_context is None
+            assert window._queue_dirty is True
+            assert "已删除歌单" in window.statusBar().currentMessage()
+        finally:
+            _close(window)
+
+    def test_delete_cancelled_keeps_playlist(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        _write_playlists(tmp_path, [LocalPlaylist(id=1, name="A")])
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            monkeypatch.setattr(
+                main_window_module.QMessageBox,
+                "question",
+                staticmethod(
+                    lambda *a, **k: main_window_module.QMessageBox.StandardButton.No
+                ),
+            )
+            window._delete_local_playlist(window._find_local_playlist(1))
+            assert [p.id for p in window._local_playlists] == [1]
+        finally:
+            _close(window)
+class TestLocalSongEditing:
+    def _open(self, window, playlist_id: int = 1) -> None:
+        window._show_local_playlist(
+            _ListRef("local-playlist", playlist_id, "P")
+        )
+
+    def test_drag_enabled_only_for_local_playlist(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        from PySide6.QtWidgets import QAbstractItemView
+
+        _write_playlists(tmp_path, [LocalPlaylist(id=1, name="P")])
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            self._open(window)
+            assert (
+                window.song_table.dragDropMode()
+                == QAbstractItemView.DragDropMode.InternalMove
+            )
+            assert window.song_table.dragEnabled()
+            # 远端列表不开拖放
+            window._set_table_songs(
+                [], "netease", _ListRef("netease-playlist", 5, "远端")
+            )
+            assert (
+                window.song_table.dragDropMode()
+                == QAbstractItemView.DragDropMode.NoDragDrop
+            )
+            assert not window.song_table.dragEnabled()
+        finally:
+            _close(window)
+
+    def test_reorder_persists_and_marks_queue_dirty(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        _write_playlists(
+            tmp_path,
+            [
+                LocalPlaylist(
+                    id=1, name="P",
+                    items=[
+                        LocalPlaylistItem(source="netease", id=n, title=t)
+                        for n, t in ((11, "A"), (12, "B"), (13, "C"))
+                    ],
+                )
+            ],
+        )
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            self._open(window)
+            # 第 3 行拖到第 1 行上半 → 插到最前
+            window.song_table.setCurrentCell(2, 0)
+            rect = window.song_table.visualRect(
+                window.song_table.model().index(0, 0)
+            )
+            event = QDropEvent(
+                QPointF(rect.center().x(), rect.top() + 2),
+                Qt.DropAction.MoveAction,
+                QMimeData(),
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            window.song_table.dropEvent(event)
+            assert event.isAccepted()
+            assert [i.title for i in window._find_local_playlist(1).items] == [
+                "C", "A", "B",
+            ]
+            assert [
+                window.song_table.item(r, 2).text()
+                for r in range(window.song_table.rowCount())
+            ] == ["C", "A", "B"]
+            assert window._queue_dirty is True
+            stored = window._store.load_local_playlists()
+            assert [i.title for i in stored[0].items] == ["C", "A", "B"]
+        finally:
+            _close(window)
+
+    def test_reorder_to_same_position_is_noop(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        _write_playlists(
+            tmp_path,
+            [
+                LocalPlaylist(
+                    id=1, name="P",
+                    items=[
+                        LocalPlaylistItem(source="netease", id=n, title=t)
+                        for n, t in ((11, "A"), (12, "B"))
+                    ],
+                )
+            ],
+        )
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            self._open(window)
+            window._queue_dirty = False
+            window.song_table.setCurrentCell(0, 0)
+            rect = window.song_table.visualRect(
+                window.song_table.model().index(0, 0)
+            )
+            event = QDropEvent(
+                QPointF(rect.center().x(), rect.top() + 2),
+                Qt.DropAction.MoveAction,
+                QMimeData(),
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            window.song_table.dropEvent(event)
+            assert [i.title for i in window._find_local_playlist(1).items] == [
+                "A", "B",
+            ]
+            # 顺序没变就不该标脏
+            assert window._queue_dirty is False
+        finally:
+            _close(window)
+
+    def test_remove_song_updates_table_and_file(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        _write_playlists(
+            tmp_path,
+            [
+                LocalPlaylist(
+                    id=1, name="P",
+                    items=[
+                        LocalPlaylistItem(source="netease", id=n, title=t)
+                        for n, t in ((11, "A"), (12, "B"))
+                    ],
+                )
+            ],
+        )
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            self._open(window)
+            window._remove_song_from_local_playlist(1, window._table_songs[0])
+            assert [i.title for i in window._find_local_playlist(1).items] == ["B"]
+            assert window.song_table.rowCount() == 1
+            assert window._queue_dirty is True
+            stored = window._store.load_local_playlists()
+            assert [i.title for i in stored[0].items] == ["B"]
+        finally:
+            _close(window)
+
+    def test_remove_uses_bvid_for_kugou(self, qapp, monkeypatch, tmp_path):
+        """酷狗两首 id 都是 0,必须按 extra["bvid"] 区分,不能删错。"""
+        _write_playlists(
+            tmp_path,
+            [
+                LocalPlaylist(
+                    id=1, name="P",
+                    items=[
+                        LocalPlaylistItem(
+                            source="kugou", id=0, extra={"bvid": "hash-a"},
+                            title="甲",
+                        ),
+                        LocalPlaylistItem(
+                            source="kugou", id=0, extra={"bvid": "hash-b"},
+                            title="乙",
+                        ),
+                    ],
+                )
+            ],
+        )
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            self._open(window)
+            window._remove_song_from_local_playlist(1, window._table_songs[1])
+            assert [i.title for i in window._find_local_playlist(1).items] == [
+                "甲"
+            ]
+        finally:
+            _close(window)
+
+    def test_remove_menu_only_in_local_context(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        _write_playlists(
+            tmp_path,
+            [
+                LocalPlaylist(
+                    id=1, name="P",
+                    items=[LocalPlaylistItem(source="netease", id=11, title="A")],
+                )
+            ],
+        )
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            captured: dict[str, list[str]] = {}
+
+            def fake_exec(menu, _pos):
+                captured["labels"] = [a.text() for a in menu.actions()]
+                return None
+
+            monkeypatch.setattr(main_window_module, "_exec_menu", fake_exec)
+            self._open(window)
+            rect = window.song_table.visualRect(
+                window.song_table.model().index(0, 0)
+            )
+            window._on_table_context_menu(rect.center())
+            assert "从歌单移除" in captured["labels"]
+            # 远端上下文:不该出现
+            window._set_table_songs(
+                [window._table_songs[0]], "netease",
+                _ListRef("netease-playlist", 5, "远端"),
+            )
+            window._on_table_context_menu(rect.center())
+            assert "从歌单移除" not in captured["labels"]
+        finally:
+            _close(window)

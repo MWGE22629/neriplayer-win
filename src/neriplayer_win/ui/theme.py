@@ -153,22 +153,26 @@ QSplitter::handle:hover {
 
 /* ---- 侧栏 --------------------------------------------------------------- */
 /* 树(M5 平台分区):条目样式与列表等价;加载占位为 NoItemFlags,走 :disabled */
-/* 分支区保持透明:rootIsDecorated 已关,此条兜底防止个别样式在子节点
-   缩进区绘制背景,把条目圆角色块左侧补出一截异色 */
 QTreeWidget {
     background: transparent;
     border: none;
     outline: none;
     font-size: 13px;
 }
+/* 分支区(子节点缩进条)必须填不透明 @surface:选中/当前行的这块背景
+   由 QTreeView 经 PE_PanelItemViewRow 交给底层样式整块填色(选中色/
+   强调色,QSS 拦不住),表现为条目胶囊左侧一截异色竖条。transparent
+   的 ::branch 规则不拦截该填充;不透明背景才会在其上整块重绘盖掉它。
+   树本身透明,背后是 QSplitter 面板的 @surface,故视觉与透明等效。 */
 QTreeWidget::branch {
-    background: transparent;
+    background: @surface;
 }
 QTreeWidget::item {
     height: 36px;
     border-radius: 18px;
     margin: 1px 8px;
-    padding: 0 12px;
+    /* 左侧内边距给分区头的竖排三点把手留槽位 */
+    padding: 0 12px 0 26px;
     color: @onSurfaceVariant;
 }
 QTreeWidget::item:hover {

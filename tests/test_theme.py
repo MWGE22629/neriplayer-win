@@ -132,3 +132,48 @@ class TestThemeManager:
             assert PALETTES[THEME_LIGHT]["surface"] in qapp.styleSheet()
         finally:
             manager.apply(DEFAULT_THEME)
+
+
+class TestSidebarBranchPainting:
+    """子节点缩进条(分支区)不得出现底层样式填的强调色竖条。
+
+    QTreeView 把选中行分支区背景交给底层样式整块填色,QSS 只有把
+    ::branch 背景设为不透明 @surface 才能盖掉。像素级断言防回归。
+    """
+
+    def test_current_child_branch_strip_matches_surface(self, qapp):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QTreeWidgetItem
+
+        from neriplayer_win.ui.main_window import _SidebarTree, MainWindow
+
+        manager = ThemeManager()
+        manager.apply(DEFAULT_THEME)  # 暗色(应用默认),写入全局 QSS
+        palette = PALETTES[DEFAULT_THEME]
+        tree = _SidebarTree()
+        header = MainWindow._make_header_item(
+            "网易云 · 歌单", None, "netease-header", sortable=True
+        )
+        tree.addTopLevelItem(header)
+        for pid in (1, 2):
+            child = QTreeWidgetItem(header, [f"歌单{pid}"])
+            child.setData(0, Qt.ItemDataRole.UserRole, ("netease-playlist", pid))
+        tree.resize(240, 400)
+        tree.show()
+        qapp.processEvents()
+        tree.setCurrentItem(header.child(0))  # current(+selected)
+        qapp.processEvents()
+
+        img = tree.viewport().grab().toImage()
+        rect = tree.visualItemRect(header.child(0))
+        y = rect.center().y()
+        surface = QColor(palette["surface"])
+        # 缩进条整条必须是不透明 surface(修复前为底层样式的强调色)
+        for x in range(0, tree.indentation()):
+            got = img.pixelColor(x, y)
+            assert got == surface, f"分支区 x={x} 颜色 {got.name()} 应为 surface"
+        # 选中胶囊仍由 ::item:selected 绘制(证明没有把选中态一并抹掉)
+        pill = img.pixelColor(rect.left() + 10, y)
+        assert pill == QColor(palette["secondaryContainer"])
+        tree.hide()

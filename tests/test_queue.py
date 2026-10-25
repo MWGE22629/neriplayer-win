@@ -581,3 +581,32 @@ class TestSettingsStore:
             "language",
             "dynamic_color",
         }
+
+
+class TestQueueSongKey:
+    """跨表匹配键:酷狗 id 恒 0,真实标识在 bvid,必须并入键。"""
+
+    def test_netease_degrades_to_source_id(self):
+        assert song(7).key == ("netease", "7")
+
+    def test_kugou_zero_ids_still_differ(self):
+        a = QueueSong(
+            source="kugou", id=0, bvid="hashA|eaA|alA",
+            title="A", artist="x", duration_ms=1,
+        )
+        b = QueueSong(
+            source="kugou", id=0, bvid="hashB|eaB|alB",
+            title="B", artist="x", duration_ms=1,
+        )
+        assert a.key != b.key
+        assert a.key == ("kugou", "0:hashA|eaA|alA")
+
+    def test_bili_key_includes_bvid(self):
+        a = QueueSong(
+            source="bili", id=1, bvid="BV1xx", title="a", artist="x", duration_ms=1,
+        )
+        b = QueueSong(
+            source="bili", id=1, bvid="BV2xx", title="b", artist="x", duration_ms=1,
+        )
+        assert a.key != b.key
+        assert a.key == ("bili", "1:BV1xx")

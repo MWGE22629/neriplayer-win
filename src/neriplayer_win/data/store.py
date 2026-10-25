@@ -395,6 +395,100 @@ def next_local_playlist_id(playlists: Sequence[LocalPlaylist]) -> int:
     return max((playlist.id for playlist in playlists), default=0) + 1
 
 
+def rename_local_playlist(
+    playlists: Sequence[LocalPlaylist], playlist_id: int, name: str
+) -> bool:
+    """重命名本地歌单;返回是否真的改动了。
+
+    - trim 后为空 → False
+    - 超过 LOCAL_PLAYLIST_NAME_MAX 截断到上限(不是拒绝)
+    - 与另一歌单重名(trim 后完全相同)→ False
+    - 与自身原名相同 → False(无变化,调用方不必落盘)
+    - 歌单 id 不存在 → False
+    - 成功 → 原地改 playlist.name,返回 True
+    """
+    target = next(
+        (playlist for playlist in playlists if playlist.id == playlist_id), None
+    )
+    if target is None:
+        return False
+    trimmed = name.strip()[:LOCAL_PLAYLIST_NAME_MAX]
+    if not trimmed:
+        return False
+    if any(
+        playlist is not target and playlist.name.strip() == trimmed
+        for playlist in playlists
+    ):
+        return False
+    if target.name.strip() == trimmed:
+        return False
+    target.name = trimmed
+    return True
+
+
+def delete_local_playlist(
+    playlists: list[LocalPlaylist], playlist_id: int
+) -> LocalPlaylist | None:
+    """原地从列表移除该歌单并返回被删对象;id 不存在返回 None。"""
+    for index, playlist in enumerate(playlists):
+        if playlist.id == playlist_id:
+            return playlists.pop(index)
+    return None
+
+
+def move_local_playlist_in_order(
+    ids: Sequence[int], playlist_id: int, delta: int
+) -> list[int] | None:
+    """返回把 playlist_id 在 id 序列里移动 delta 位后的新序列。
+
+    - 目标下标越界(<0 或 >= len)→ None
+    - playlist_id 不在 ids 里 → None
+    - delta == 0 或移动后位置与原位置相同 → None
+    - 成功 → 返回新列表(不改动入参)
+    """
+    order = list(ids)
+    try:
+        index = order.index(playlist_id)
+    except ValueError:
+        return None
+    target = index + delta
+    if target < 0 or target >= len(order) or target == index:
+        return None
+    order.insert(target, order.pop(index))
+    return order
+
+
+def move_local_playlist_item(
+    playlist: LocalPlaylist, from_index: int, to_index: int
+) -> bool:
+    """把 playlist.items[from_index] 移到 to_index(移动后该元素位于该下标)。
+
+    - 任一越界或 from_index == to_index → False
+    - 成功 → 原地移动并返回 True
+    """
+    items = playlist.items
+    if from_index == to_index:
+        return False
+    if not (0 <= from_index < len(items)) or not (0 <= to_index < len(items)):
+        return False
+    items.insert(to_index, items.pop(from_index))
+    return True
+
+
+def remove_local_playlist_item(
+    playlist: LocalPlaylist, key: tuple[str, str]
+) -> LocalPlaylistItem | None:
+    """按 LocalPlaylistItem.key 移除并返回该条目;不存在返回 None。
+
+    必须用 item.key 比较,不能直接写 (source, id):酷狗歌曲 id 恒为 0,
+    真实标识在 extra["bvid"] 里,LocalPlaylistItem.key 负责这点。
+    """
+    for index, item in enumerate(playlist.items):
+        if item.key == key:
+            return playlist.items.pop(index)
+    return None
+
+
 def _validated_local_extra(value: Any) -> dict[str, str] | None:
     """extra 校验:dict[str, str];键值超长截断而不是丢弃条目。"""
     if not isinstance(value, dict):

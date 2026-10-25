@@ -224,6 +224,22 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "local.cover_set": ("已设置「{name}」的封面", "Cover updated for \"{name}\""),
     "local.cover_auto_set": ("「{name}」已恢复自动封面",
                              "\"{name}\" now uses the automatic cover"),
+    "local.rename_menu": ("重命名…", "Rename…"),
+    "local.rename_prompt": ("重命名歌单", "Rename playlist"),
+    "local.renamed": ("已重命名为「{name}」", "Renamed to \"{name}\""),
+    "local.name_taken": ("已有同名歌单", "A playlist with this name already exists"),
+    "local.delete_menu": ("删除歌单…", "Delete playlist…"),
+    "local.delete_confirm": (
+        "确定删除歌单「{name}」?其中 {count} 首歌曲会一并移除,无法撤销。",
+        "Delete \"{name}\"? Its {count} songs will be removed too. "
+        "This cannot be undone.",
+    ),
+    "local.deleted": ("已删除歌单「{name}」", "Deleted playlist \"{name}\""),
+    "local.remove_menu": ("从歌单移除", "Remove from playlist"),
+    "local.removed": ("已从「{playlist}」移除:{title}",
+                      "Removed from \"{playlist}\": {title}"),
+    "local.move_up": ("上移", "Move up"),
+    "local.move_down": ("下移", "Move down"),
     # -- 播放模式(player.queue display_name/button_label 也走这里)-----------
     "mode.sequence": ("顺序播放", "Sequential"),
     "mode.shuffle": ("随机播放", "Shuffle"),
