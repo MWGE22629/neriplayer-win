@@ -22,4 +22,4 @@ if sys.platform == "win32":
     except OSError:
         pass
 
-__version__ = "0.9.0-beta.2"
+__version__ = "0.9.3"

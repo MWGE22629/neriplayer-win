@@ -45,9 +45,9 @@ DIST = REPO / "dist" / "neriplayer-win"
 EXE_NAME = "NeriPlayerWin.exe"
 
 APP_NAME = "NeriPlayer Win"
-# Windows 资源版本必须是数字四段式(不接受 -beta.2 后缀);
+# Windows 资源版本必须是数字四段式(不接受预发布后缀);
 # 对外展示的版本号见 neriplayer_win.__version__
-APP_VERSION = "0.9.0.2"
+APP_VERSION = "0.9.3.0"
 
 # winlibs MinGW(Nuitka 4.2.1 指定版本;变更 Nuitka 版本时需同步更新)
 MINGW_URL_PATH = (

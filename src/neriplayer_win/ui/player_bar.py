@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QStyle,
     QStyleOptionButton,
@@ -70,6 +71,98 @@ class ElidedLabel(QLabel):
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         super().resizeEvent(event)
         self._reapply()
+
+
+class QualityLabel(QLabel):
+    """音质标签:完整/仅档位 两态整态切换,不出省略号。
+
+    宽窗口显示「无损 FLAC · 1411 kbps」,窄窗口只显示「无损 FLAC」。
+    两种都是完整文本,没有残缺态。切换点由实际可用宽度决定:
+    够宽就换回完整串,不够就退成档位名。
+
+    不继承 ElidedLabel:后者的 sizeHint 按已截断文本算,首次布局后会
+    塌缩到最小宽且再也展不开;而且它必然产生省略号,与两态要求相反。
+    """
+
+    _PAD = 6  # 左右内边距合计,给文字留呼吸空间
+    # 上限只用于防止超长文本无限占位,必须足够宽以容纳完整串。
+    # 取 320 覆盖 13px 雅黑下的最长串「Immersive Surround · 2000 kbps」(约 180px)
+    # 与高 DPI / 大字号下的放大;真正的显示宽度由布局按窗口宽分配。
+    _MAX_W = 320
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__("", parent)
+        self.setObjectName("qualityLabel")
+        self.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self._full = ""
+        self._short = ""
+        self._showing_full = True
+        # 宽度缓存:resize 高频触发,每次都新建 QFontMetrics 会明显拖慢
+        # (实测每次约 5.8ms)。只在文本变化时重算。
+        self._full_w = 0
+        self._short_w = 0
+        self.setMinimumWidth(0)
+        self.setMaximumWidth(self._MAX_W)
+        self.hide()
+
+    # -- 对外状态 ------------------------------------------------------------
+
+    def set_texts(self, full: str, short: str) -> None:
+        """设定两种形态;full 为空表示无音质信息,整条隐藏。"""
+        self._full = full
+        self._short = short or full
+        self._showing_full = True
+        metrics = QFontMetrics(self.font())
+        self._full_w = metrics.horizontalAdvance(self._full) + self._PAD
+        self._short_w = metrics.horizontalAdvance(self._short) + self._PAD
+        self.setText(full)
+        self.setToolTip(full)
+        self.updateGeometry()
+        self.setVisible(bool(full))
+
+    def clear(self) -> None:  # noqa: D102 - 覆盖 QLabel.clear
+        self._full = ""
+        self._short = ""
+        self._showing_full = True
+        super().clear()
+        self.setToolTip("")
+        self.hide()
+
+    # -- 尺寸与切换 ----------------------------------------------------------
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt 命名
+        if not self._full:
+            return QSize(0, 0)
+        # 上限与 _MAX_W 保持一致:否则完整串超上限时,布局给不出足够宽度,
+        # 切换判据永远不成立,标签会卡在短形态。
+        width = min(self._full_w, self._MAX_W)
+        return QSize(width, self.fontMetrics().height())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt 命名
+        # 取短形态宽度:这是标签能压到的极限,也因此不会抬高窗口最小宽
+        if not self._short:
+            return QSize(0, 0)
+        return QSize(self._short_w, self.fontMetrics().height())
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().resizeEvent(event)
+        self._apply_fit()
+
+    def _apply_fit(self) -> None:
+        # 完整串本身超过 _MAX_W 时,任何宽度都放不下(会横向裁切),
+        # 此时只保留短形态;否则按「可用宽 ≥ 完整串所需宽」整态切换。
+        if not self._full:
+            return
+        need = self._full_w
+        fits_at_all = need <= self._MAX_W
+        wide_enough = fits_at_all and self.width() >= need
+        if wide_enough and not self._showing_full:
+            self._showing_full = True
+            self.setText(self._full)
+        elif not wide_enough and self._showing_full:
+            self._showing_full = False
+            self.setText(self._short)
 
 
 def rounded_pixmap(source: QPixmap, size: int, radius: int) -> QPixmap:
@@ -427,6 +520,8 @@ class PlayerBar(QWidget):
         self._playing = False
         self._track_set = False  # set_track 后占位文案不再随语言重翻译覆盖
         self._cover_url = ""
+        # 音质标签原料:(已翻译档位名, 码率kbps);None 表示无标签
+        self._quality_parts: tuple[str, int] | None = None
 
         # 封面小图(40x40 圆角;加载中/缺失显示淡色音符占位;
         # 切歌交叉淡化见 _CoverLabel)
@@ -482,6 +577,9 @@ class PlayerBar(QWidget):
         self.volume_icon_label.setFixedSize(20, 20)
         self.volume_icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+        # 音质标签:两态整态切换(见 QualityLabel);无音质信息时隐藏
+        self.quality_label = QualityLabel()
+
         self.position_slider = SeekSlider()
         self.position_slider.setRange(0, 0)
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
@@ -515,6 +613,8 @@ class PlayerBar(QWidget):
         controls_row.addWidget(self.prev_button)
         controls_row.addWidget(self.play_button)
         controls_row.addWidget(self.next_button)
+        # 音质标签紧贴中间控制组右侧:属于「当前播放内容」,不归右侧工具区
+        controls_row.addWidget(self.quality_label)
         controls_row.addStretch(1)
         controls_row.addWidget(self.queue_button)
         controls_row.addWidget(self.volume_icon_label)
@@ -547,6 +647,43 @@ class PlayerBar(QWidget):
         self._track_set = True
         self.track_label.set_text_elided(title)
         self.artist_label.set_text_elided(artist)
+
+    def set_quality(self, full: str, short: str = "") -> None:
+        """直接设置两态文案(已翻译);不参与语言切换重译。"""
+        self._quality_parts = None
+        self.quality_label.set_texts(full, short)
+
+    def set_quality_parts(self, label_key: str, kbps: int = 0) -> None:
+        """按「档位名 i18n 键 + 码率」设置标签,语言切换时自动重译。
+
+        label_key 为档位名的 i18n 键(如 quality.lossless);kbps 为 0 表示
+        码率未知,此时两态相同。label_key 为空而 kbps>0 时只显示码率。
+        两者都空表示无音质信息,标签隐藏。
+        """
+        self._quality_parts = (label_key, kbps)
+        self._apply_quality_parts()
+
+    def _apply_quality_parts(self) -> None:
+        parts = self._quality_parts
+        if parts is None:
+            return
+        label_key, kbps = parts
+        label = tr(label_key) if label_key else ""
+        if not label and kbps <= 0:
+            self.quality_label.set_texts("", "")
+        elif not label:
+            only = tr("player.quality_kbps_only", kbps=kbps)
+            self.quality_label.set_texts(only, only)
+        elif kbps <= 0:
+            self.quality_label.set_texts(label, label)
+        else:
+            full = tr("player.quality_full", label=label, kbps=kbps)
+            self.quality_label.set_texts(full, label)
+
+    def clear_quality(self) -> None:
+        """清空音质标签(停止播放时用,避免残留上一首的档位)。"""
+        self._quality_parts = None
+        self.quality_label.clear()
 
     def set_cover(self, url: str) -> None:
         """请求封面;空 URL 延迟 900ms 回占位图(连续切歌不闪灰底)。
@@ -639,6 +776,7 @@ class PlayerBar(QWidget):
         self.set_playing(self._playing)  # 现取播放/暂停 tooltip
         if not self._track_set:
             self.track_label.set_text_elided(tr("player.not_playing"))
+        self._apply_quality_parts()  # 音质标签存的是 i18n 键,语言切换要重译
 
     # -- 图标 ----------------------------------------------------------------
 

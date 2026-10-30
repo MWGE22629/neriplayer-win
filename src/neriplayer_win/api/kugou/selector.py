@@ -25,10 +25,19 @@ _QUALITY_CHAIN: dict[str, tuple[str, ...]] = {
 }
 
 # 统一档位键 -> 展示用短名(状态栏音质后缀)
+# 仅供纯函数测试与内部回退使用;UI 层请用 quality_key() 取键再走 i18n,
+# 否则英文界面会漏出中文短名。
 QUALITY_LABELS: dict[str, str] = {
     "lossless": "无损",
     "exhigh": "320k",
     "standard": "128k",
+}
+
+# 档位键 -> i18n 键(UI 层翻译用)
+_QUALITY_I18N_KEYS: dict[str, str] = {
+    "lossless": "quality.kugou_lossless",
+    "exhigh": "quality.kugou_320",
+    "standard": "quality.kugou_128",
 }
 
 # 实测各 hash 字段对应的码率,用于回填 KugouPlayableUrl.bitrate_kbps
@@ -63,7 +72,7 @@ def select_hash(hashes: dict[str, str], preferred: str) -> tuple[str, str]:
     return "", ""
 
 def quality_label(preferred: str, field_name: str = "") -> str:
-    """状态栏音质后缀。
+    """状态栏音质后缀(中文硬编码,保留兼容;新代码用 quality_key)。
 
     优先按实际生效的 hash 字段报码率(用户选无损但只有 320k 时如实报 320k),
     字段未知时回落到偏好档位的短名。
@@ -76,3 +85,24 @@ def quality_label(preferred: str, field_name: str = "") -> str:
             return "320k"
         return "128k"
     return QUALITY_LABELS.get(preferred, "")
+
+
+def quality_key(preferred: str, field_name: str = "") -> str:
+    """实际生效档位的统一键(lossless/exhigh/standard),供 UI 层走 i18n。
+
+    与 quality_label 同一判定逻辑,只把「已翻译的短名」换成「档位键」。
+    返回空串表示档位未知。
+    """
+    bitrate = hash_field_bitrate(field_name)
+    if bitrate:
+        if bitrate >= 900:
+            return "lossless"
+        if bitrate >= 320:
+            return "exhigh"
+        return "standard"
+    return preferred if preferred in _QUALITY_I18N_KEYS else ""
+
+
+def quality_i18n_key(preferred: str, field_name: str = "") -> str:
+    """实际生效档位对应的 i18n 键;档位未知时返回空串。"""
+    return _QUALITY_I18N_KEYS.get(quality_key(preferred, field_name), "")

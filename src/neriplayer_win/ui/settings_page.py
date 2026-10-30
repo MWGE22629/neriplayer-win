@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QRadioButton,
     QScrollArea,
     QSpinBox,
@@ -192,6 +193,7 @@ class SettingsPage(QWidget):
     recent_max_changed = Signal(int)  # 「最近」分区条数(1~50)
     language_changed = Signal(str)  # "zh" | "en"
     dynamic_color_changed = Signal(bool)  # 播放时跟随封面取色
+    stats_open_requested = Signal()  # 打开播放统计页
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -259,6 +261,16 @@ class SettingsPage(QWidget):
         language_layout.addWidget(self.language_switch)
         language_layout.addStretch(1)
 
+        # 播放统计:入口按钮 + 一行说明(统计页本身是独立页面)
+        self.stats_group = QGroupBox()
+        stats_layout = QHBoxLayout(self.stats_group)
+        self._stats_hint = QLabel()
+        self.stats_open_button = QPushButton()
+        self.stats_open_button.clicked.connect(self.stats_open_requested.emit)
+        stats_layout.addWidget(self._stats_hint)
+        stats_layout.addStretch(1)
+        stats_layout.addWidget(self.stats_open_button)
+
         self.about_group = QGroupBox()
         about_layout = QVBoxLayout(self.about_group)
         self.about_name = QLabel()
@@ -284,6 +296,7 @@ class SettingsPage(QWidget):
         root.addWidget(self.quality_group)
         root.addWidget(self.appearance_group)
         root.addWidget(self.language_group)
+        root.addWidget(self.stats_group)
         root.addWidget(self.about_group)
         root.addStretch(1)
 
@@ -345,6 +358,9 @@ class SettingsPage(QWidget):
         self.language_group.setTitle(i18n.tr("settings.language_group"))
         self._language_label.setText(i18n.tr("settings.language"))
         self.language_switch.setAccessibleName(i18n.tr("settings.language"))
+        self.stats_group.setTitle(i18n.tr("settings.stats_group"))
+        self._stats_hint.setText(i18n.tr("settings.stats_hint"))
+        self.stats_open_button.setText(i18n.tr("settings.stats_open"))
         self.retheme_link()
 
     # 兼容旧名:MainWindow._on_theme_changed 调用的锚点重取色

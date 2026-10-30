@@ -137,6 +137,11 @@ QLabel#artistLabel {
     font-size: 13px;
     color: @onSurfaceVariant;
 }
+/* 音质标签:次级信息,不用主色以免抢「正在播放」的强调 */
+QLabel#qualityLabel {
+    font-size: 13px;
+    color: @onSurfaceVariant;
+}
 /* 关于页链接:跟随主题主色,亮色下依旧可读 */
 QLabel#aboutLink {
     color: @primary;

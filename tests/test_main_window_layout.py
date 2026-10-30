@@ -17,10 +17,10 @@ from __future__ import annotations
 import json
 import time
 
-from PySide6.QtCore import QPointF, QMimeData, QSize, Qt
+from PySide6.QtCore import QEvent, QPointF, QMimeData, QSize, Qt
 from PySide6.QtGui import QDropEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem
+from PySide6.QtWidgets import QApplication, QTreeWidget, QTreeWidgetItem
 
 from neriplayer_win.api.bili import BiliAccount, BiliFavFolder, BiliFavItem
 from neriplayer_win.api.netease import (
@@ -55,6 +55,15 @@ def _close(window) -> None:
     # (媒体热键仍被占,污染后续测试),故强制真退出路径
     window._force_exit = True
     window.close()
+    # 显式销毁:只 close 的话 Qt 对象要等 Python GC 才释放,而全局
+    # setStyleSheet 会遍历全部存活控件——泄漏的窗口会让后续主题切换
+    # 越来越慢(实测累积上万控件后,单次 apply 从 72ms 涨到 2.3s)。
+    # processEvents() 默认不处理 DeferredDelete,必须显式投递。
+    window.deleteLater()
+    app = QApplication.instance()
+    if app is not None:
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
 
 
 def test_body_layout_renders_central_and_player_bar(qapp, monkeypatch, tmp_path):

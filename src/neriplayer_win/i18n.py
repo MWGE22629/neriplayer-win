@@ -319,6 +319,29 @@ _STRINGS: dict[str, tuple[str, str]] = {
         "Derived from NeriPlayer (cwuom). Thanks to the upstream project.",
     ),
     "settings.about_upstream": ("上游仓库:{url}", "Upstream repository: {url}"),
+    # -- 播放统计 ---------------------------------------------------------------
+    "settings.stats_group": ("播放统计", "Playback Stats"),
+    "settings.stats_open": ("查看统计", "View stats"),
+    "settings.stats_hint": (
+        "统计累计收听时长与播放次数(暂停不计时)",
+        "Total listening time and play counts (pauses excluded)",
+    ),
+    "stats.title": ("播放统计", "Playback Stats"),
+    "stats.back": ("返回设置", "Back to settings"),
+    "stats.clear": ("清空统计", "Clear stats"),
+    "stats.empty": ("还没有播放记录", "No playback records yet"),
+    "stats.unknown_title": ("(未知歌曲)", "(Unknown track)"),
+    "stats.col_number": ("#", "#"),
+    "stats.col_cover": ("封面", "Cover"),
+    "stats.col_title": ("标题", "Title"),
+    "stats.col_duration": ("播放时长", "Listening time"),
+    "stats.col_count": ("播放次数", "Play count"),
+    "stats.clear_confirm_title": ("清空播放统计", "Clear playback stats"),
+    "stats.clear_confirm_text": (
+        "将删除全部播放统计(累计时长与播放次数),此操作不可撤销。",
+        "All playback stats (total time and play counts) will be deleted. "
+        "This cannot be undone.",
+    ),
     # -- 实际生效音质(状态栏后缀)----------------------------------------------
     "quality.lossless": ("无损 FLAC", "Lossless FLAC"),
     "quality.hires": ("Hi-Res", "Hi-Res"),
@@ -329,6 +352,13 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "quality.jyeffect": ("高清环绕声", "Hi-Res Surround"),
     "quality.sky": ("沉浸环绕声", "Immersive Surround"),
     "quality.dolby": ("杜比", "Dolby"),
+    # 酷狗档位(原为硬编码中文,英文界面会漏出中文)
+    "quality.kugou_lossless": ("无损", "Lossless"),
+    "quality.kugou_320": ("320k", "320k"),
+    "quality.kugou_128": ("128k", "128k"),
+    # -- 播放条音质标签(档位 + 码率两态)----------------------------------------
+    "player.quality_full": ("{label} · {kbps} kbps", "{label} · {kbps} kbps"),
+    "player.quality_kbps_only": ("{kbps} kbps", "{kbps} kbps"),
     # -- 网页登录对话框 -----------------------------------------------------------
     "weblogin.netease.title": ("网易云音乐 · 网页登录",
                                "NetEase Cloud Music · Web Login"),

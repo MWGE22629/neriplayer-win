@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QStackedLayout,
     QStackedWidget,
     QSplitter,
     QStyledItemDelegate,
@@ -80,6 +81,7 @@ from ..api.kugou import (
     KugouCredentials,
     KugouPlaylist,
     KugouSong,
+    kugou_quality_i18n_key,
     kugou_quality_label,
 )
 from ..api.netease import (
@@ -120,6 +122,8 @@ from ..data.store import (
     rename_local_playlist,
 )
 from .. import bootstamp
+from ..data.play_stats import PlayStat, PlayStatsStore, make_key
+from ..data.play_stats_tracker import PlayStatsTracker
 from ..i18n import tr
 from ..log import get_logger
 from ..player.engine import PlayerEngine, PlayerEngineError
@@ -141,6 +145,7 @@ from .media_keys import MediaKeyHandler
 from .player_bar import PlayerBar, format_seconds, rounded_pixmap
 from .queue_window import QueueWindow
 from .settings_page import SettingsPage
+from .stats_page import StatsPage
 from .taskbar import TaskbarThumbBar
 from .theme import ThemeManager
 from .textsafe import sanitize_ui_text
@@ -150,6 +155,7 @@ from .workers import run_async
 _PAGE_LOGIN = 0
 _PAGE_TABLE = 1
 _PAGE_SETTINGS = 2
+_PAGE_STATS = 3
 
 # 基础窗口标题(品牌名,不随语言变):任务栏歌名显示的宽度基准
 logger = get_logger("main_window")
@@ -276,6 +282,30 @@ def _bili_quality_suffix(stream: BiliAudioStreamInfo) -> str:
     return f"({' '.join(part for part in parts if part)})"
 
 
+def _netease_quality_parts(level: str | None) -> tuple[str, int]:
+    """网易云 → (档位名 i18n 键, 码率)。
+
+    网易云播放接口不返回码率(解析层只取 type/level/size),所以码率恒 0,
+    标签只显示档位名;而档位名本身已隐含码率(320K / 128K)。
+    """
+    if not level:
+        return "", 0
+    key = _NETEASE_LEVEL_KEYS.get(level)
+    # 未识别的新档位原样展示:键为空时直接用 level 文本(与状态栏同策略)
+    return (key if key is not None else level), 0
+
+
+def _bili_quality_parts(stream: BiliAudioStreamInfo) -> tuple[str, int]:
+    """B站 → (档位名 i18n 键, 码率)。
+
+    有杜比/Hi-Res 标签时用标签名,否则只用码率(键为空)。
+    """
+    if stream.bitrate_kbps <= 0:
+        return "", 0
+    key = _BILI_QUALITY_TAG_KEYS.get(stream.quality_tag or "")
+    return (key if key is not None else ""), stream.bitrate_kbps
+
+
 def _netease_song_to_queue(song: NeteaseSong) -> QueueSong:
     # 标题/歌手净化:第三方文本可能含主字体不覆盖的字符,任一命中都会
     # 触发 DirectWrite 回退字体(+45~50MB,见 docs/PERF.md);队列标题
@@ -383,6 +413,10 @@ class _SongContext:
     rotator: BackupUrlRotator
     headers: dict[str, str] | None
     status: str  # 状态栏文案(含实际生效音质 / 试听提示)
+    # 音质标签原料:档位名 i18n 键 + 码率(kbps,0 表示未知)。
+    # 存键而非译文,语言切换后播放条能自行重译。
+    quality_key: str = ""
+    quality_kbps: int = 0
 
 
 @dataclass
@@ -395,6 +429,9 @@ class _PrefetchedPlay:
     headers: dict[str, str] | None
     status: str
     created_at: float  # time.monotonic() 时间戳,TTL 校验用
+    # 音质标签原料,随预取一起缓存(与 status 同源)
+    quality_key: str = ""
+    quality_kbps: int = 0
 
 
 class _EmptyStateView(QWidget):
@@ -1317,6 +1354,13 @@ class MainWindow(QMainWindow):
 
         self._store = LocalStore()
         self._settings = self._store.load_settings()
+        # M9 播放统计:独立数据文件 + 计时状态机(口径见 data/play_stats*.py)
+        self._play_stats_store = PlayStatsStore()
+        self._play_stats: dict[str, PlayStat] = {
+            stat.key: stat for stat in self._play_stats_store.load()
+        }
+        self._stats_tracker = PlayStatsTracker()
+        self._stats_timer: QTimer | None = None
         # 界面语言先于任何控件构造(静态文案在构建时就取当前语言);
         # 语言变更监听在 UI 全部建好后再注册(_on_language_changed 依赖全套控件)
         i18n.set_language(
@@ -1532,6 +1576,11 @@ class MainWindow(QMainWindow):
         self.settings_page = SettingsPage()
         self._wire_settings_page()
 
+        # 统计页懒创建:QTableWidget 构造成本较高(实测每次约 100ms 级),
+        # 而多数会话不会打开统计页,不必在每次启动时都付这个代价。
+        self.stats_page: StatsPage | None = None
+        self._stats_page_added = False
+
         self.central_stack = _SlideStack()
         self.central_stack.addWidget(self.login_page)  # 0
         self.central_stack.addWidget(table_page)  # 1
@@ -1540,6 +1589,7 @@ class MainWindow(QMainWindow):
         # -- 侧栏 -------------------------------------------------------------
         # QTreeWidget(M5):平台分区可折叠 + 分区内歌单/收藏夹拖拽排序
         self.sidebar = _SidebarTree()
+        self.sidebar.setObjectName("mainSidebar")
         # 宽度可拖动(QSplitter),硬边界兜底;运行期按窗口比例钳制见 _clamp
         self.sidebar.setMinimumWidth(140)
         self.sidebar.setMaximumWidth(480)
@@ -1595,6 +1645,7 @@ class MainWindow(QMainWindow):
         self.themes.apply(self._settings.get(SETTING_APPEARANCE, "dark"))
 
         body = QWidget()
+        body.setObjectName("mainBody")
         layout = QHBoxLayout(body)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -1616,7 +1667,12 @@ class MainWindow(QMainWindow):
         self._splitter.splitterMoved.connect(
             lambda *_: self._clamp_sidebar_width()
         )
-        self.setCentralWidget(self._splitter)
+        self._central_host = QWidget()
+        host_layout = QVBoxLayout(self._central_host)
+        host_layout.setContentsMargins(0, 0, 0, 0)
+        host_layout.setSpacing(0)
+        host_layout.addWidget(self._splitter)
+        self.setCentralWidget(self._central_host)
         self._clamp_sidebar_width()
 
         self.statusBar().showMessage(tr("common.ready"))
@@ -3799,6 +3855,8 @@ class MainWindow(QMainWindow):
                 prefetched.headers,
                 status=prefetched.status,
                 from_prefetch=True,
+                quality_key=prefetched.quality_key,
+                quality_kbps=prefetched.quality_kbps,
             )
             return
 
@@ -3825,6 +3883,7 @@ class MainWindow(QMainWindow):
             )
             # B站 m4s 音频流要求 Referer + 浏览器 UA,否则 403;
             # candidate_urls 含主 URL 与 backupUrls,加载失败时轮换
+            q_key, q_kbps = _bili_quality_parts(stream)
             return _SongContext(
                 rotator=BackupUrlRotator(stream.candidate_urls),
                 headers=build_bili_stream_headers(),
@@ -3832,6 +3891,8 @@ class MainWindow(QMainWindow):
                     "play.playing",
                     title=song.title, quality=_bili_quality_suffix(stream),
                 ),
+                quality_key=q_key,
+                quality_kbps=q_kbps,
             )
         if song.source == "kugou":
             return self._resolve_kugou_context(song, quality)
@@ -3855,8 +3916,13 @@ class MainWindow(QMainWindow):
             )
         )
         # 网易云不参与 backupUrls 轮换:音质回退链已在解析层完成
+        # 试听片段不标音质(用户听到的不是完整音质,标档位会误导)
+        q_key, q_kbps = (
+            ("", 0) if playable.is_preview else _netease_quality_parts(playable.level)
+        )
         return _SongContext(
-            rotator=BackupUrlRotator([playable.url]), headers=None, status=status
+            rotator=BackupUrlRotator([playable.url]), headers=None, status=status,
+            quality_key=q_key, quality_kbps=q_kbps,
         )
 
     def _resolve_kugou_context(self, song: QueueSong, quality: str) -> _SongContext:
@@ -3872,6 +3938,9 @@ class MainWindow(QMainWindow):
         playable = self._kugou_client.resolve_playable_url(
             kugou_song, preferred_quality=quality
         )
+        # 档位名走 i18n(原 selector 里是硬编码中文,英文界面会漏中文)
+        q_key = kugou_quality_i18n_key(quality, playable.quality_key)
+        q_kbps = playable.bitrate_kbps
         return _SongContext(
             rotator=BackupUrlRotator(playable.candidate_urls),
             headers=None,
@@ -3880,6 +3949,8 @@ class MainWindow(QMainWindow):
                 title=song.title,
                 quality=kugou_quality_label(quality, playable.quality_key),
             ),
+            quality_key=q_key,
+            quality_kbps=q_kbps,
         )
 
     def _resolve_and_start(self, song: QueueSong, generation: int) -> None:
@@ -3926,7 +3997,10 @@ class MainWindow(QMainWindow):
             if kind == "error":
                 self._handle_play_failure(song, payload)
                 return
-            self._start_play(song, payload.rotator, payload.headers, status=payload.status)
+            self._start_play(
+                song, payload.rotator, payload.headers, status=payload.status,
+                quality_key=payload.quality_key, quality_kbps=payload.quality_kbps,
+            )
 
         return on_done
 
@@ -3941,7 +4015,10 @@ class MainWindow(QMainWindow):
             if kind == "error":
                 self._handle_play_failure(song, payload)
                 return
-            self._start_play(song, payload.rotator, payload.headers, status=payload.status)
+            self._start_play(
+                song, payload.rotator, payload.headers, status=payload.status,
+                quality_key=payload.quality_key, quality_kbps=payload.quality_kbps,
+            )
 
         return on_done
 
@@ -3964,7 +4041,10 @@ class MainWindow(QMainWindow):
             if kind == "error":
                 self._handle_play_failure(song, payload)
                 return
-            self._start_play(song, payload.rotator, payload.headers, status=payload.status)
+            self._start_play(
+                song, payload.rotator, payload.headers, status=payload.status,
+                quality_key=payload.quality_key, quality_kbps=payload.quality_kbps,
+            )
 
         return on_done
 
@@ -3975,12 +4055,16 @@ class MainWindow(QMainWindow):
         headers: dict[str, str] | None,
         status: str | None = None,
         from_prefetch: bool = False,
+        quality_key: str = "",
+        quality_kbps: int = 0,
     ) -> None:
         url = rotator.current
         if not url:
             # 解析成功但没有任何可用地址:同样是播放失败,走统一出口
             self._handle_play_failure(song, tr("play.no_url"))
             return
+        # 音质标签随起播一起刷新:解析层已给出最终生效档位(含降级回退)
+        self.player_bar.set_quality_parts(quality_key, quality_kbps)
         self._active = _ActivePlay(
             song=song, rotator=rotator, headers=headers, from_prefetch=from_prefetch
         )
@@ -3997,6 +4081,146 @@ class MainWindow(QMainWindow):
         self.engine.play_url(url, headers)
         self._push_recent()  # 成功起播才算「听过」(仅浏览不压栈)
         self._schedule_prefetch_next()  # 起播成功:顺手后台预取下一首
+        self._stats_begin_song(song)  # 新播放周期开始(结算上一首)
+
+    # -- 播放统计 --------------------------------------------------------------
+
+    def _stats_begin_song(self, song: QueueSong) -> None:
+        """起播时开新统计周期;上一首的遗留增量在此结算落盘。"""
+        key = make_key(song.source, song.id, song.bvid)
+        leftover = self._stats_tracker.on_song_changed(key)
+        self._stats_apply_delta(key, leftover, song)
+        self._stats_ensure_timer()
+
+    def _stats_ensure_timer(self) -> None:
+        """惰性启动 250ms 统计定时器(与引擎进度轮询同频)。
+
+        定时器独立于引擎:引擎在 stop 时会停掉自己的轮询,而统计需要在
+        暂停、切歌等时刻仍能周期性落盘。
+        """
+        if self._stats_timer is not None:
+            if not self._stats_timer.isActive():
+                self._stats_timer.start()
+            return
+        timer = QTimer(self)
+        timer.setInterval(250)
+        timer.timeout.connect(self._stats_on_tick)
+        timer.start()
+        self._stats_timer = timer
+
+    def _stats_on_tick(self) -> None:
+        """250ms tick:喂给 tracker,并按周期落盘。
+
+        窗口不可见(托盘/最小化)时不跑:统计靠墙钟增量,隐藏期间本来
+        就不该计时,跳过也顺带避免后台空转。
+        """
+        if not self.isVisible():
+            return
+        engine = self.engine
+        if engine is None:
+            return
+        position = engine.position()
+        duration = engine.duration()
+        self._stats_tracker.on_progress(position, duration)
+        if self._stats_tracker.should_flush():
+            self._stats_flush()
+
+    def _stats_apply_delta(
+        self,
+        key: str,
+        delta: object,
+        song: QueueSong | None = None,
+    ) -> None:
+        """把增量写进内存表。song 为 None 时只在已有条目上累加。"""
+        if delta is None:
+            return
+        listened = getattr(delta, "listened_ms", 0)
+        count = getattr(delta, "count_inc", 0)
+        if listened <= 0 and count <= 0:
+            return
+        stat = self._play_stats.get(key)
+        if stat is None:
+            if song is None:
+                return
+            now = int(time.time() * 1000)
+            stat = PlayStat(
+                key=key,
+                source=song.source,
+                song_id=song.id,
+                bvid=song.bvid,
+                title=song.title,
+                artist=song.artist,
+                cover_url=song.cover_url,
+                duration_ms=song.duration_ms,
+                first_played_at=now,
+                last_played_at=now,
+            )
+            self._play_stats[key] = stat
+        if listened > 0:
+            stat.listen_ms += int(listened)
+        if count > 0:
+            stat.play_count += int(count)
+        stat.last_played_at = int(time.time() * 1000)
+
+    def _stats_flush(self) -> None:
+        """把内存表整份落盘(增量已先写进内存,写失败不丢累计值)。"""
+        if not self._play_stats:
+            return
+        self._play_stats_store.save(list(self._play_stats.values()))
+
+    def _stats_settle_current(self) -> None:
+        """结束当前播放周期并落盘(暂停/停止/切歌/退出时调用)。"""
+        key = self._stats_tracker.key
+        if not key:
+            return
+        delta = self._stats_tracker.take_delta()
+        self._stats_apply_delta(key, delta)
+        self._stats_flush()
+
+    def _stats_on_track_ended(self) -> None:
+        """整曲播完:无条件计一次并落盘。"""
+        key = self._stats_tracker.key
+        if not key:
+            return
+        delta = self._stats_tracker.on_track_ended()
+        self._stats_apply_delta(key, delta)
+        self._stats_flush()
+
+    def _ensure_stats_page(self) -> StatsPage:
+        """首次打开统计页时才构造并挂进页面栈。"""
+        if self.stats_page is None:
+            self.stats_page = StatsPage()
+            self.stats_page.back_requested.connect(
+                lambda: self.central_stack.setCurrentIndex(_PAGE_SETTINGS)
+            )
+            self.stats_page.clear_requested.connect(self._on_stats_clear_requested)
+            self.central_stack.addWidget(self.stats_page)
+            self._stats_page_added = True
+        return self.stats_page
+
+    def _open_stats_page(self) -> None:
+        """从设置页打开统计页:重算并填充,再切页。"""
+        self._stats_settle_current()
+        page = self._ensure_stats_page()
+        page.set_stats(self._play_stats.values())
+        self.central_stack.setCurrentIndex(_PAGE_STATS)
+
+    def _on_stats_clear_requested(self) -> None:
+        """清空统计:二次确认后清内存、删文件、刷新页面。"""
+        answer = QMessageBox.question(
+            self,
+            tr("stats.clear_confirm_title"),
+            tr("stats.clear_confirm_text"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._play_stats.clear()
+        self._play_stats_store.clear()
+        if self.stats_page is not None:
+            self.stats_page.set_stats([])
+        self.statusBar().showMessage(tr("stats.empty"))
 
     # -- 「最近」列表 ------------------------------------------------------------
 
@@ -4108,6 +4332,8 @@ class MainWindow(QMainWindow):
                 headers=context.headers,
                 status=context.status,
                 created_at=time.monotonic(),
+                quality_key=context.quality_key,
+                quality_kbps=context.quality_kbps,
             )
 
         def on_prefetched(result) -> None:
@@ -4241,6 +4467,8 @@ class MainWindow(QMainWindow):
     def _on_track_ended(self) -> None:
         """一首播完:按模式自动接播(单曲循环重播当前,顺序到尾即停)。"""
         self._play_fail_count = 0  # 正常播完一首:连续失败计数复位
+        # 统计:整曲播完无条件计一次(短曲不足 30 秒也算)
+        self._stats_on_track_ended()
         if self._queue.mode() is PlayMode.REPEAT_ONE and self._active is not None:
             url = self._active.rotator.current
             if url:
@@ -4387,6 +4615,7 @@ class MainWindow(QMainWindow):
         page.recent_max_changed.connect(self._on_settings_recent_max)
         page.language_changed.connect(self._on_settings_language)
         page.dynamic_color_changed.connect(self._on_settings_dynamic_color)
+        page.stats_open_requested.connect(self._open_stats_page)
         page.set_close_action(self._settings.get("close_action", "tray"))
         page.set_play_mode(self._settings.get("play_mode", "sequence"))
         page.set_appearance(self._settings.get(SETTING_APPEARANCE, "dark"))
@@ -4439,6 +4668,10 @@ class MainWindow(QMainWindow):
         self._eq_set_active(playing)
         if self._route_guard is not None:
             self._route_guard.set_playing(playing)
+        # 统计:暂停必须立即停表(mpv 暂停生效前会漏一个带增量的 tick)
+        self._stats_tracker.on_playing_changed(playing)
+        if not playing:
+            self._stats_settle_current()
 
     def _wire_player_bar(self) -> None:
         bar = self.player_bar
@@ -4464,6 +4697,8 @@ class MainWindow(QMainWindow):
             self._taskbar.set_enabled(active)
 
     def _on_seek_requested(self, position_s: float) -> None:
+        # 统计:拖到结尾会触发 mpv 的 eof,那种情况不算「播完」一次
+        self._stats_tracker.on_seek(position_s)
         if self.engine is not None:
             self.engine.seek(position_s)
 
@@ -4597,7 +4832,11 @@ class MainWindow(QMainWindow):
             self._route_guard.notify_user_action()
         if self.engine is not None:
             self.engine.stop()
+        if self._stats_timer is not None:
+            self._stats_timer.stop()  # 停止播放:统计定时器也停,不再空转
         self.player_bar.set_playing(False)
+        self.player_bar.clear_quality()  # 停止:不留上一首的档位
+        self._stats_settle_current()  # 停止:结算并落盘当前周期
         self._reset_window_title()  # 停止播放:任务栏恢复基础标题
         self.statusBar().showMessage(tr("common.stopped"))
 
@@ -4633,6 +4872,10 @@ class MainWindow(QMainWindow):
                 )
                 self._tray_hint_shown = True
             return
+        # 退出前结算统计并落盘:托盘隐藏路径不算退出(进程仍在,定时器继续)
+        self._stats_settle_current()
+        if self._stats_timer is not None:
+            self._stats_timer.stop()
         self.login_page.stop()
         i18n.remove_listener(self._on_language_changed)
         if self._queue_window is not None:

@@ -36,6 +36,30 @@ def qapp():
     yield app
 
 
+@pytest.fixture(autouse=True)
+def _destroy_windows_after_test():
+    """每个用例结束后销毁遗留的顶层窗口。
+
+    动机:Qt 的 QApplication 是进程级单例,窗口只 close() 不会销毁 Python/
+    C++ 对象(要等 GC 且 DeferredDelete 事件被处理)。而主题切换会调用
+    setStyleSheet,它会 re-polish 全进程存活控件——泄漏的窗口越攒越多,
+    单次 apply 从 72ms 涨到 2.3s,整个套件从几十秒退化到六分钟。
+    这里统一在用例结束时销毁,避免每个测试文件各写一遍(漏写就是回归)。
+    """
+    yield
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in app.topLevelWidgets():
+        widget.close()
+        widget.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_sessionfinish(session, exitstatus):
     yield

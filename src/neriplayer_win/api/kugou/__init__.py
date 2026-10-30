@@ -46,6 +46,8 @@ from .selector import (
     QUALITY_LABELS,
     hash_field_bitrate,
     quality_chain,
+    quality_i18n_key,
+    quality_key,
     quality_label,
     select_hash,
 )
@@ -53,6 +55,7 @@ from .selector import (
 # 命名别名:主窗口按「源名 + 用途」的习惯引用(对齐
 # bili_quality_key_from_netease_level 的写法)
 kugou_quality_label = quality_label
+kugou_quality_i18n_key = quality_i18n_key
 
 __all__ = [
     "ANDROID_UA",
@@ -77,6 +80,7 @@ __all__ = [
     "KugouRateLimitedError",
     "KugouSong",
     "hash_field_bitrate",
+    "kugou_quality_i18n_key",
     "kugou_quality_label",
     "parse_play_response",
     "parse_playlist_list_response",
@@ -84,6 +88,8 @@ __all__ = [
     "parse_search_response",
     "parse_song_info_response",
     "quality_chain",
+    "quality_i18n_key",
+    "quality_key",
     "quality_label",
     "select_hash",
 ]
