@@ -59,6 +59,9 @@ SETTING_APPEARANCE = "appearance"
 SETTING_PLAY_QUALITY = "play_quality"
 SETTING_LANGUAGE = "language"
 SETTING_DYNAMIC_COLOR = "dynamic_color"
+# 播放音量(0-100 整数):记住上次退出时的值,启动时回填到播放条与 mpv。
+# 默认 70,与 PlayerEngine / PlayerBar 的出厂值一致(M10)。
+SETTING_VOLUME = "volume"
 SETTING_SIDEBAR_EXPANDED = "sidebar_expanded"
 SETTING_NETEASE_PLAYLIST_ORDER = "netease_playlist_order"
 SETTING_NETEASE_SUBSCRIBED_ORDER = "netease_subscribed_order"
@@ -80,6 +83,9 @@ DEFAULT_PLAY_MODE = "sequence"
 DEFAULT_APPEARANCE = "dark"
 DEFAULT_PLAY_QUALITY = "lossless"
 DEFAULT_RECENT_MAX = 8
+# 音量默认值:与 PlayerEngine._player.volume = 70.0 / PlayerBar 滑块的
+# 出厂值同源,旧配置无 volume 键时行为不变
+DEFAULT_VOLUME = 70
 # 动态取色(M5):播放时从封面提取主色套用动态主题;对齐 Android 端默认开
 DEFAULT_DYNAMIC_COLOR = True
 # 语言代码以 neriplayer_win.i18n 为单一来源,此处沿用本文件命名习惯
@@ -136,6 +142,7 @@ def default_settings() -> dict[str, Any]:
         SETTING_PLAY_QUALITY: DEFAULT_PLAY_QUALITY,
         SETTING_LANGUAGE: DEFAULT_LANGUAGE,
         SETTING_DYNAMIC_COLOR: DEFAULT_DYNAMIC_COLOR,
+        SETTING_VOLUME: DEFAULT_VOLUME,
         SETTING_SIDEBAR_EXPANDED: {section: True for section in _SIDEBAR_SECTIONS},
         SETTING_NETEASE_PLAYLIST_ORDER: [],
         SETTING_NETEASE_SUBSCRIBED_ORDER: [],
@@ -250,6 +257,22 @@ def _validated_recent_max(value: Any) -> int:
     if isinstance(value, int) and not isinstance(value, bool):
         return max(_MIN_RECENT_MAX, min(_MAX_RECENT_MAX, value))
     return DEFAULT_RECENT_MAX
+
+
+def _validated_volume(value: Any) -> int:
+    """volume 校验:只收 0~100 的 int(bool 不算),其余回落默认 70。
+
+    不做钳位而是回落默认:音量是一个连续可调量,越界值只可能来自
+    坏配置,静默截成 100 与静默截成 70 相比,后者更容易被用户察觉
+    并纠正,也不会突然把音量推到极值。
+    """
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= 100
+    ):
+        return value
+    return DEFAULT_VOLUME
 
 
 def _validated_int(value: Any, default: int) -> int:
@@ -782,6 +805,7 @@ class LocalStore:
             merged[SETTING_LANGUAGE] = data[SETTING_LANGUAGE]
         if isinstance(data.get(SETTING_DYNAMIC_COLOR), bool):
             merged[SETTING_DYNAMIC_COLOR] = data[SETTING_DYNAMIC_COLOR]
+        merged[SETTING_VOLUME] = _validated_volume(data.get(SETTING_VOLUME))
         merged[SETTING_SIDEBAR_EXPANDED] = _validated_sidebar_expanded(
             data.get(SETTING_SIDEBAR_EXPANDED)
         )
@@ -814,6 +838,7 @@ class LocalStore:
             merged[SETTING_LANGUAGE] = settings[SETTING_LANGUAGE]
         if isinstance(settings.get(SETTING_DYNAMIC_COLOR), bool):
             merged[SETTING_DYNAMIC_COLOR] = settings[SETTING_DYNAMIC_COLOR]
+        merged[SETTING_VOLUME] = _validated_volume(settings.get(SETTING_VOLUME))
         merged[SETTING_SIDEBAR_EXPANDED] = _validated_sidebar_expanded(
             settings.get(SETTING_SIDEBAR_EXPANDED)
         )

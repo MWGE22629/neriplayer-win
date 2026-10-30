@@ -94,6 +94,7 @@ from ..api.netease import (
 )
 from ..data.store import (
     DEFAULT_RECENT_MAX,
+    DEFAULT_VOLUME,
     LOCAL_PLAYLIST_NAME_MAX,
     SETTING_APPEARANCE,
     SETTING_BILI_FOLDER_ORDER,
@@ -108,6 +109,7 @@ from ..data.store import (
     SETTING_RECENT_MAX,
     SETTING_SECTION_ORDER,
     SETTING_SIDEBAR_EXPANDED,
+    SETTING_VOLUME,
     LocalPlaylist,
     LocalPlaylistItem,
     LocalStore,
@@ -219,6 +221,11 @@ _SEARCH_PAGE_SIZE = 30  # 对齐参考实现 NETEASE_SEARCH_PAGE_SIZE
 _SEARCH_TITLE_PREFIX = "搜索:"
 
 _MODE_CYCLE = (PlayMode.SEQUENCE, PlayMode.SHUFFLE, PlayMode.REPEAT_ONE)
+
+# 音量记忆(M10):滑块拖动时 valueChanged 逐像素触发,落盘走防抖,
+# 避免拖动一次写几十遍 settings.json;退出时 closeEvent 再补存一次,
+# 保证最后一次改动不丢。
+_VOLUME_SAVE_DELAY_MS = 400
 
 # 连续播放失败熔断上限。低于 Android 参考实现的 MAX_CONSECUTIVE_FAILURES=10:
 # 桌面端没有 watchdog 做逐级判定(冻结/恢复/重建管线),弱网下逐曲盲跳只会
@@ -1626,11 +1633,18 @@ class MainWindow(QMainWindow):
         self._taskbar: TaskbarThumbBar | None = None
         self.player_bar = PlayerBar()
         self.player_bar.setObjectName("playerBar")
+        # 音量防抖落盘定时器(M10):须先于 _wire_player_bar 建好,
+        # 保证 valueChanged 早到也不会碰到未初始化的属性
+        self._volume_save_timer = QTimer(self)
+        self._volume_save_timer.setSingleShot(True)
+        self._volume_save_timer.setInterval(_VOLUME_SAVE_DELAY_MS)
+        self._volume_save_timer.timeout.connect(self._flush_volume_setting)
         self._set_play_controls_active(False)
         if self.engine is not None:
             self._wire_engine()
         self._wire_player_bar()
         self._wire_queue()
+        self._restore_volume()
 
         # -- 主题(M4):应用持久化主题;此后切换经 theme_changed 全量刷新 -----
         # 注意:_on_theme_changed 会触碰 _tray 等属性,须先完成初始化
@@ -4705,6 +4719,31 @@ class MainWindow(QMainWindow):
     def _on_volume_changed(self, volume: int) -> None:
         if self.engine is not None:
             self.engine.set_volume(volume)
+        # 音量记忆(M10):内存值立即更新,落盘延后到拖动停下
+        # (_VOLUME_SAVE_DELAY_MS),同一次拖动只写一次文件
+        self._settings[SETTING_VOLUME] = max(0, min(100, int(volume)))
+        self._volume_save_timer.start()
+
+    def _flush_volume_setting(self) -> None:
+        """把当前音量写进 settings.json;IO 失败静默(音量属轻量偏好,
+        不值得为一次落盘失败弹状态栏,下次改动会再试)。"""
+        if self._volume_save_timer.isActive():
+            self._volume_save_timer.stop()
+        self._store.save_settings(self._settings)
+
+    def _restore_volume(self) -> None:
+        """启动回填上次退出的音量(滑块 + mpv 双侧),默认 70。
+
+        滑块回填会触发 valueChanged,但 PlayerBar.set_volume 内部屏蔽了
+        信号,不会反过来再发一次音量变更;引擎侧直接 set 一次即可。
+        """
+        volume = self._settings.get(SETTING_VOLUME, DEFAULT_VOLUME)
+        if not isinstance(volume, int) or isinstance(volume, bool):
+            volume = DEFAULT_VOLUME
+        volume = max(0, min(100, volume))
+        self.player_bar.set_volume(volume)
+        if self.engine is not None:
+            self.engine.set_volume(volume)
 
     # -- 托盘与媒体键 ------------------------------------------------------------
 
@@ -4876,6 +4915,9 @@ class MainWindow(QMainWindow):
         self._stats_settle_current()
         if self._stats_timer is not None:
             self._stats_timer.stop()
+        # 音量补存:拖完滑块 400ms 内就退出时,防抖定时器可能还没触发
+        if self._volume_save_timer.isActive():
+            self._flush_volume_setting()
         self.login_page.stop()
         i18n.remove_listener(self._on_language_changed)
         if self._queue_window is not None:

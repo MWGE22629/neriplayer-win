@@ -562,13 +562,14 @@ class TestSettingsStore:
         # M4 起新增 appearance、M5 起新增 play_quality / sidebar_expanded /
         # netease_playlist_order / netease_subscribed_order / bili_folder_order /
         # recent_max / recent_lists / language / dynamic_color 键、
-        # M6 起新增 kugou_playlist_order、M8 起新增 section_order 键;
-        # 未知键始终被拒
+        # M6 起新增 kugou_playlist_order、M8 起新增 section_order、
+        # M10 起新增 volume 键;未知键始终被拒
         assert set(raw) == {
             "close_action",
             "play_mode",
             "appearance",
             "play_quality",
+            "volume",
             "sidebar_expanded",
             "netease_playlist_order",
             "netease_subscribed_order",

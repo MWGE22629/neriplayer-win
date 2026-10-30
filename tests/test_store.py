@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from neriplayer_win.data.store import (
+    DEFAULT_VOLUME,
     LocalStore,
     apply_stored_order,
     default_data_dir,
@@ -144,6 +145,25 @@ class TestLocalStoreSettings:
         assert settings["play_mode"] == "sequence"
         assert settings["appearance"] == "dark"
         assert settings["play_quality"] == "lossless"
+        assert settings["volume"] == DEFAULT_VOLUME == 70
+
+    def test_volume_roundtrip(self, tmp_path, monkeypatch):
+        store = make_store(tmp_path, monkeypatch)
+        for value in (0, 35, 70, 100):
+            assert store.save_settings({"volume": value}) is True
+            assert store.load_settings()["volume"] == value
+
+    def test_invalid_volume_falls_back(self, tmp_path, monkeypatch):
+        store = make_store(tmp_path, monkeypatch)
+        store.settings_path.parent.mkdir(parents=True, exist_ok=True)
+        for value in (-1, 101, "55", True, 33.5, None):
+            store.settings_path.write_text(
+                json.dumps({"volume": value}), encoding="utf-8"
+            )
+            assert store.load_settings()["volume"] == DEFAULT_VOLUME
+        # 保存侧同样拒收非法值,回落默认而不是截断到 100
+        assert store.save_settings({"volume": 101}) is True
+        assert store.load_settings()["volume"] == DEFAULT_VOLUME
 
     def test_appearance_roundtrip(self, tmp_path, monkeypatch):
         store = make_store(tmp_path, monkeypatch)
@@ -205,6 +225,7 @@ class TestLocalStoreSettings:
             "recent_lists": [],
             "language": "zh",
             "dynamic_color": True,
+            "volume": 70,
         }
 
 
