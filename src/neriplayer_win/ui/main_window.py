@@ -125,6 +125,13 @@ from ..data.store import (
 )
 from .. import bootstamp
 from ..data.play_stats import PlayStat, PlayStatsStore, make_key
+from ..data.store import (
+    AMBIENT_FLOW,
+    AMBIENT_OFF,
+    AMBIENT_SOLID,
+    DEFAULT_AMBIENT_EFFECT,
+    SETTING_AMBIENT_EFFECT,
+)
 from ..data.play_stats_tracker import PlayStatsTracker
 from ..i18n import tr
 from ..log import get_logger
@@ -140,6 +147,8 @@ from .browser_login import (
 )
 from .kugou_login import KugouQrLoginDialog
 from .covers import CoverLoader
+from .flow_background import FlowBackground
+from .flow_palette import flow_colors_from_palette
 from .icons import app_icon, tinted_icon, tinted_icon_with_color, tray_icon
 from .login_page import LoginPage
 from .material_color import seed_from_hex
@@ -1592,6 +1601,10 @@ class MainWindow(QMainWindow):
         self.central_stack.addWidget(self.login_page)  # 0
         self.central_stack.addWidget(table_page)  # 1
         self.central_stack.addWidget(self.settings_page)  # 2
+        # 切页时补设/清除透明属性:流光档下每个新页面都要透明
+        self.central_stack.currentChanged.connect(
+            lambda _index: self._sync_flow_page_transparency()
+        )
 
         # -- 侧栏 -------------------------------------------------------------
         # QTreeWidget(M5):平台分区可折叠 + 分区内歌单/收藏夹拖拽排序
@@ -1681,12 +1694,20 @@ class MainWindow(QMainWindow):
         self._splitter.splitterMoved.connect(
             lambda *_: self._clamp_sidebar_width()
         )
+        # 流光背景:作为 splitter 的兄弟控件垫在底下,手动同步几何。
+        # 不给 splitter/body/central_host 设 WA_TranslucentBackground:
+        # 那会让整棵树不再自动清屏,逐帧叠加表现为拖影与浅色块累积。
+        # 只给「页面栈 + 当前页面 + 侧栏 viewport」设,范围最小。
         self._central_host = QWidget()
+        self._central_host.setObjectName("centralHost")
         host_layout = QVBoxLayout(self._central_host)
         host_layout.setContentsMargins(0, 0, 0, 0)
         host_layout.setSpacing(0)
+        self.flow_background = FlowBackground(self._central_host)
         host_layout.addWidget(self._splitter)
         self.setCentralWidget(self._central_host)
+        self.flow_background.lower()
+        self.flow_background.setGeometry(self._central_host.rect())
         self._clamp_sidebar_width()
 
         self.statusBar().showMessage(tr("common.ready"))
@@ -1698,6 +1719,7 @@ class MainWindow(QMainWindow):
         self._setup_route_guard()
         self._setup_taskbar()
 
+        self._apply_ambient_effect()  # 按保存的档位初始化背景
         self._rebuild_sidebar()
         self._update_table_empty_state()
         self.central_stack.setCurrentIndex(_PAGE_LOGIN)
@@ -3322,6 +3344,8 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         super().resizeEvent(event)
         self._clamp_sidebar_width()
+        if getattr(self, "flow_background", None) is not None:
+            self.flow_background.setGeometry(self._central_host.rect())
 
     def _clamp_sidebar_width(self) -> None:
         """把侧栏宽度限制在窗口宽度的 1/10 ~ 1/2(拖动与窗口缩放都生效)。"""
@@ -4097,6 +4121,130 @@ class MainWindow(QMainWindow):
         self._schedule_prefetch_next()  # 起播成功:顺手后台预取下一首
         self._stats_begin_song(song)  # 新播放周期开始(结算上一首)
 
+    # -- 流光背景 --------------------------------------------------------------
+
+    def _on_settings_ambient_effect(self, value: str) -> None:
+        """背景效果切换:落盘 + 立即应用。"""
+        self._settings[SETTING_AMBIENT_EFFECT] = value
+        self._store.save_settings(self._settings)
+        self._apply_ambient_effect()
+
+    def _refresh_flow_colors(self) -> None:
+        """只刷新背景色,不改 QSS、不改透明属性(供主题/换歌回调使用)。"""
+        if getattr(self, "flow_background", None) is None:
+            return
+        value = self._settings.get(SETTING_AMBIENT_EFFECT, DEFAULT_AMBIENT_EFFECT)
+        if value not in (AMBIENT_SOLID, AMBIENT_FLOW):
+            return
+        palette = theme.current_palette()
+        dark = theme.current_theme_name() == "dark"
+        self.flow_background.set_colors(
+            flow_colors_from_palette(palette, dark=dark),
+            base_hex=palette.get("surface", ""),
+            dark=dark,
+            animate=False,
+        )
+
+    def _apply_ambient_effect(self) -> None:
+        """按当前设置应用背景:off 关闭、solid 纯色、flow 流光。"""
+        if getattr(self, "flow_background", None) is None:
+            return
+        value = self._settings.get(SETTING_AMBIENT_EFFECT, DEFAULT_AMBIENT_EFFECT)
+        transparent = value in (AMBIENT_SOLID, AMBIENT_FLOW)
+        self._set_flow_transparent(transparent)
+        if not transparent:
+            self.flow_background.set_enabled(False)
+            return
+        palette = theme.current_palette()
+        dark = theme.current_theme_name() == "dark"
+        self.flow_background.set_enabled(True)
+        self.flow_background.set_colors(
+            flow_colors_from_palette(palette, dark=dark),
+            base_hex=palette.get("surface", ""),
+            dark=dark,
+            animate=False,
+        )
+        self.flow_background.set_solid(value != AMBIENT_FLOW)
+        if value == AMBIENT_FLOW:
+            self.flow_background.start()
+        else:
+            self.flow_background.stop()
+
+    def _set_flow_transparent(self, enabled: bool) -> None:
+        """切换内容页的透明态,让底部背景层的流光透上来。
+
+        两路,缺一不可(实测):
+        1. 给侧栏/内容容器打 flowTransparent 属性,QSS 把它们各自的
+           背景改成透明(含 QTreeWidget 的 branch 条);
+        2. 给页面栈与当前页面设 WA_TranslucentBackground。QStackedWidget
+           及其页面用 palette 填不透明底,QSS 拦不住,必须靠这个属性。
+
+        绝不给 QSplitter/body/centralHost 设该属性:会让整棵树不再自动
+        清屏,逐帧叠加表现为侧栏拖影与浅色块累积。
+        """
+        from PySide6.QtWidgets import QApplication
+
+        for widget in (
+            getattr(self, "_central_host", None),
+            getattr(self, "sidebar", None),
+            getattr(self, "player_bar", None),
+            self.findChild(QWidget, "mainBody"),
+        ):
+            if widget is None:
+                continue
+            widget.setProperty("flowTransparent", enabled)
+            style = widget.style()
+            style.unpolish(widget)
+            style.polish(widget)
+            widget.update()
+        # QSplitter 与 mainBody 必须设 WA_TranslucentBackground:它们是
+        # 覆盖在整个中央区上的不透明容器,QSS 改背景拦不住(实测内联样式
+        # 也无效),只有这个属性能让下层背景透上来。
+        # 注意范围:只给这两层 + 侧栏 viewport + 页面栈设。若给 central_host
+        # 这类中间容器也设,整棵树会不再自动清屏,表现为拖影与浅色块累积。
+        for widget in (
+            getattr(self, "_splitter", None),
+            self.findChild(QWidget, "mainBody"),
+        ):
+            if widget is not None:
+                widget.setAttribute(
+                    Qt.WidgetAttribute.WA_TranslucentBackground, enabled
+                )
+                widget.update()
+        # 播放条内的歌名信息浮层同样要透明,否则在光场上留硬边黑块
+        for name in ("trackInfoHost", "trackInfoBox"):
+            widget = self.findChild(QWidget, name)
+            if widget is not None:
+                widget.setProperty("flowTransparent", enabled)
+                style = widget.style()
+                style.unpolish(widget)
+                style.polish(widget)
+                widget.update()
+        sidebar = getattr(self, "sidebar", None)
+        if sidebar is not None:
+            sidebar.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, enabled)
+            viewport = sidebar.viewport()
+            if viewport is not None:
+                viewport.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, enabled)
+            sidebar.update()
+        self._flow_transparent = enabled
+        self._sync_flow_page_transparency()
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+
+    def _sync_flow_page_transparency(self) -> None:
+        """给页面栈与当前页面设/清 WA_TranslucentBackground。"""
+        stack = getattr(self, "central_stack", None)
+        if stack is None:
+            return
+        enabled = getattr(self, "_flow_transparent", False)
+        stack.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, enabled)
+        page = stack.currentWidget()
+        if page is not None:
+            page.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, enabled)
+        stack.update()
+
     # -- 播放统计 --------------------------------------------------------------
 
     def _stats_begin_song(self, song: QueueSong) -> None:
@@ -4311,6 +4459,7 @@ class MainWindow(QMainWindow):
         self._dynamic_seed = seed
         if self._settings.get(SETTING_DYNAMIC_COLOR, True):
             self.themes.apply_dynamic(seed)
+        self._refresh_flow_colors()  # 背景跟封面主色,520ms 过渡见 flow_background
 
     def _revert_static_theme(self) -> None:
         """回退静态冻结色板(歌无封面 / 关闭开关)。"""
@@ -4596,6 +4745,7 @@ class MainWindow(QMainWindow):
         self._search_netease_btn.setText(tr("search.source_netease"))
         self._search_bili_btn.setText(tr("search.source_bili"))
         self._search_more_btn.setText(tr("search.more"))
+        self._apply_ambient_effect()  # 按保存的档位初始化背景
         self._rebuild_sidebar()
         self._update_table_empty_state()
         self._update_source_indicator(animate=False)  # 文字变宽,指示线重新对位
@@ -4617,6 +4767,7 @@ class MainWindow(QMainWindow):
         self.settings_page.retheme_link()
         self.settings_page.language_switch.update()  # 自绘滑块按新色板重画
         self._apply_sidebar_icons()
+        self._refresh_flow_colors()
         if self._tray is not None:
             self._tray.set_icon(tray_icon(name))
 
@@ -4630,6 +4781,7 @@ class MainWindow(QMainWindow):
         page.language_changed.connect(self._on_settings_language)
         page.dynamic_color_changed.connect(self._on_settings_dynamic_color)
         page.stats_open_requested.connect(self._open_stats_page)
+        page.ambient_effect_changed.connect(self._on_settings_ambient_effect)
         page.set_close_action(self._settings.get("close_action", "tray"))
         page.set_play_mode(self._settings.get("play_mode", "sequence"))
         page.set_appearance(self._settings.get(SETTING_APPEARANCE, "dark"))
@@ -4642,6 +4794,9 @@ class MainWindow(QMainWindow):
         )
         page.set_dynamic_color(
             self._settings.get(SETTING_DYNAMIC_COLOR, True)
+        )
+        page.set_ambient_effect(
+            self._settings.get(SETTING_AMBIENT_EFFECT, DEFAULT_AMBIENT_EFFECT)
         )
 
     # -- 队列窗口 --------------------------------------------------------------
@@ -4878,6 +5033,14 @@ class MainWindow(QMainWindow):
         self._stats_settle_current()  # 停止:结算并落盘当前周期
         self._reset_window_title()  # 停止播放:任务栏恢复基础标题
         self.statusBar().showMessage(tr("common.stopped"))
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().showEvent(event)
+        # 建窗阶段设置透明属性时控件尚未显示,repolish 不生效;
+        # 首次显示后再应用一次,确保流光档的透明样式真的落地。
+        if not getattr(self, "_flow_applied_on_show", False):
+            self._flow_applied_on_show = True
+            self._apply_ambient_effect()
 
     def _show_main_window(self) -> None:
         self.show()

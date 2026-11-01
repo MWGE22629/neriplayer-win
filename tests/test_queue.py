@@ -581,6 +581,7 @@ class TestSettingsStore:
             "recent_lists",
             "language",
             "dynamic_color",
+            "ambient_effect",  # M9 流光背景
         }
 
 

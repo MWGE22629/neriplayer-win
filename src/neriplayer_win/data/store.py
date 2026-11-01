@@ -59,6 +59,13 @@ SETTING_APPEARANCE = "appearance"
 SETTING_PLAY_QUALITY = "play_quality"
 SETTING_LANGUAGE = "language"
 SETTING_DYNAMIC_COLOR = "dynamic_color"
+# M9 流光背景:关闭 / 动态纯色 / 流光。默认关闭,保持既有观感不变。
+SETTING_AMBIENT_EFFECT = "ambient_effect"
+AMBIENT_OFF = "off"
+AMBIENT_SOLID = "solid"
+AMBIENT_FLOW = "flow"
+DEFAULT_AMBIENT_EFFECT = AMBIENT_OFF
+_VALID_AMBIENT_EFFECTS = (AMBIENT_OFF, AMBIENT_SOLID, AMBIENT_FLOW)
 # 播放音量(0-100 整数):记住上次退出时的值,启动时回填到播放条与 mpv。
 # 默认 70,与 PlayerEngine / PlayerBar 的出厂值一致(M10)。
 SETTING_VOLUME = "volume"
@@ -142,6 +149,7 @@ def default_settings() -> dict[str, Any]:
         SETTING_PLAY_QUALITY: DEFAULT_PLAY_QUALITY,
         SETTING_LANGUAGE: DEFAULT_LANGUAGE,
         SETTING_DYNAMIC_COLOR: DEFAULT_DYNAMIC_COLOR,
+        SETTING_AMBIENT_EFFECT: DEFAULT_AMBIENT_EFFECT,
         SETTING_VOLUME: DEFAULT_VOLUME,
         SETTING_SIDEBAR_EXPANDED: {section: True for section in _SIDEBAR_SECTIONS},
         SETTING_NETEASE_PLAYLIST_ORDER: [],
@@ -805,6 +813,9 @@ class LocalStore:
             merged[SETTING_LANGUAGE] = data[SETTING_LANGUAGE]
         if isinstance(data.get(SETTING_DYNAMIC_COLOR), bool):
             merged[SETTING_DYNAMIC_COLOR] = data[SETTING_DYNAMIC_COLOR]
+        ambient = data.get(SETTING_AMBIENT_EFFECT)
+        if ambient in _VALID_AMBIENT_EFFECTS:
+            merged[SETTING_AMBIENT_EFFECT] = ambient
         merged[SETTING_VOLUME] = _validated_volume(data.get(SETTING_VOLUME))
         merged[SETTING_SIDEBAR_EXPANDED] = _validated_sidebar_expanded(
             data.get(SETTING_SIDEBAR_EXPANDED)

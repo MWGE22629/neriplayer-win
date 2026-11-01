@@ -543,6 +543,7 @@ class PlayerBar(QWidget):
         info_block.addWidget(self.artist_label)
         # 文本块封顶宽度:长标题截断为 …,不把窗口/控制键挤走
         info_container = QWidget()
+        info_container.setObjectName("trackInfoBox")
         info_container.setLayout(info_block)
         info_container.setMaximumWidth(420)
         info_container.setMinimumWidth(120)
@@ -596,6 +597,7 @@ class PlayerBar(QWidget):
 
         # 封面+信息块放进步滑宿主:按住横滑切上一首/下一首(A 端手势)
         self._swipe_host = _SwipeHost()
+        self._swipe_host.setObjectName("trackInfoHost")
         host_layout = QHBoxLayout(self._swipe_host)
         host_layout.setContentsMargins(0, 0, 0, 0)
         host_layout.setSpacing(8)

@@ -104,6 +104,32 @@ QWidget {
     color: @onSurface;
     font-size: 13px;
 }
+/* ---- 流光背景透出口 ----------------------------------------------------
+   背景层垫在 centralHost 之下。下面几条把「背景容器」自己的底去掉,
+   让光场透出来。表格、卡片、按钮、输入框各有更具体的规则,仍是实底。
+   只在流光/纯色档生效:MainWindow 给容器设 flowTransparent 属性,
+   关闭档为 false,这些规则不命中,观感与改动前完全一致。 */
+#centralHost[flowTransparent="true"],
+#mainBody[flowTransparent="true"],
+#centralHost[flowTransparent="true"] QSplitter {
+    background: transparent;
+}
+/* 侧栏:树控件本身与分支条都要透明,否则条目左侧会留一截实色 */
+#mainSidebar[flowTransparent="true"],
+#mainSidebar[flowTransparent="true"]::branch {
+    background: transparent;
+}
+/* 播放条:半透明浮起,透出底部光场 */
+#playerBar[flowTransparent="true"] {
+    background: rgba(30, 33, 37, 200);
+}
+/* 播放条内的歌名信息区:这是叠在播放条上的浮层,底色要跟着透明,
+   否则在光场上会留一块硬边黑矩形(实测) */
+#trackInfoHost[flowTransparent="true"],
+#trackInfoHost[flowTransparent="true"] QWidget,
+#trackInfoBox[flowTransparent="true"] {
+    background: transparent;
+}
 QDialog, QMessageBox {
     background: @surfaceContainer;
 }

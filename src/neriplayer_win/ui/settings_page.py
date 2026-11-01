@@ -45,6 +45,12 @@ _APPEARANCE_ITEMS = [
     ("settings.theme.dark", "dark"),
     ("settings.theme.light", "light"),
 ]
+# M9 流光背景三档:关闭 / 动态纯色 / 流光
+_AMBIENT_ITEMS = [
+    ("settings.ambient.off", "off"),
+    ("settings.ambient.solid", "solid"),
+    ("settings.ambient.flow", "flow"),
+]
 # 音质偏好取网易云档位键(与 data.store._VALID_PLAY_QUALITIES 对齐),
 # 默认 lossless;B站播放时由 selector 换算成对应的 B站偏好键
 _QUALITY_ITEMS = [
@@ -194,6 +200,7 @@ class SettingsPage(QWidget):
     language_changed = Signal(str)  # "zh" | "en"
     dynamic_color_changed = Signal(bool)  # 播放时跟随封面取色
     stats_open_requested = Signal()  # 打开播放统计页
+    ambient_effect_changed = Signal(str)  # "off" | "solid" | "flow"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -252,6 +259,14 @@ class SettingsPage(QWidget):
         self.dynamic_color_check.setChecked(True)
         self.dynamic_color_check.toggled.connect(self.dynamic_color_changed.emit)
         appearance_layout.addWidget(self.dynamic_color_check)
+        # M9 流光背景:三档下拉(默认关闭,保持既有观感)
+        self._ambient_label = QLabel()
+        self.ambient_combo = QComboBox()
+        for label_key, value in _AMBIENT_ITEMS:
+            self.ambient_combo.addItem(i18n.tr(label_key), userData=value)
+        self.ambient_combo.currentIndexChanged.connect(self._on_ambient_index_changed)
+        appearance_layout.addWidget(self._ambient_label)
+        appearance_layout.addWidget(self.ambient_combo)
 
         self.language_group = QGroupBox()
         self._language_label = QLabel()
@@ -348,6 +363,9 @@ class SettingsPage(QWidget):
         for index, (label_key, _value) in enumerate(_APPEARANCE_ITEMS):
             self.appearance_combo.setItemText(index, i18n.tr(label_key))
         self.dynamic_color_check.setText(i18n.tr("settings.dynamic_color"))
+        self._ambient_label.setText(i18n.tr("settings.ambient"))
+        for index, (label_key, _value) in enumerate(_AMBIENT_ITEMS):
+            self.ambient_combo.setItemText(index, i18n.tr(label_key))
         self.dynamic_color_check.setToolTip(i18n.tr("settings.dynamic_color_tooltip"))
         self.about_group.setTitle(i18n.tr("settings.about_group"))
         self.about_name.setText(
@@ -390,6 +408,20 @@ class SettingsPage(QWidget):
         value = self.appearance_combo.currentData()
         if isinstance(value, str):
             self.appearance_changed.emit(value)
+
+    def _on_ambient_index_changed(self, _index: int) -> None:
+        value = self.ambient_combo.currentData()
+        if isinstance(value, str):
+            self.ambient_effect_changed.emit(value)
+
+    def set_ambient_effect(self, value: str) -> None:
+        """回填当前档位(blockSignals 防回环)。"""
+        for index in range(self.ambient_combo.count()):
+            if self.ambient_combo.itemData(index) == value:
+                self.ambient_combo.blockSignals(True)
+                self.ambient_combo.setCurrentIndex(index)
+                self.ambient_combo.blockSignals(False)
+                return
 
     def _on_quality_index_changed(self, _index: int) -> None:
         value = self.quality_combo.currentData()
