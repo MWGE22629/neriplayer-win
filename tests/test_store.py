@@ -230,6 +230,48 @@ class TestLocalStoreSettings:
         }
 
 
+class TestAmbientEffectSetting:
+    """流光背景设置的落盘(回归:save_settings 曾漏掉这个键)。
+
+    漏写的表现是:切换档位后内存值对、界面也变,但一写盘就被
+    default_settings() 的默认值覆盖回去,重启后永远回到纯色。
+    """
+
+    def test_flow_survives_save_and_reload(self, tmp_path, monkeypatch):
+        store = make_store(tmp_path, monkeypatch)
+        assert store.save_settings({"ambient_effect": "flow"}) is True
+        assert store.load_settings()["ambient_effect"] == "flow"
+
+    def test_solid_survives_save_and_reload(self, tmp_path, monkeypatch):
+        store = make_store(tmp_path, monkeypatch)
+        store.save_settings({"ambient_effect": "flow"})
+        store.save_settings({"ambient_effect": "solid"})
+        assert store.load_settings()["ambient_effect"] == "solid"
+
+    def test_legacy_off_maps_to_solid(self, tmp_path, monkeypatch):
+        """旧版本存过 "off",读回时按纯色处理。"""
+        store = make_store(tmp_path, monkeypatch)
+        assert store.save_settings({"ambient_effect": "off"}) is True
+        assert store.load_settings()["ambient_effect"] == "solid"
+
+    def test_invalid_value_falls_back_to_default(self, tmp_path, monkeypatch):
+        store = make_store(tmp_path, monkeypatch)
+        store.save_settings({"ambient_effect": "bogus"})
+        assert store.load_settings()["ambient_effect"] == "solid"
+
+    def test_other_settings_do_not_reset_ambient(self, tmp_path, monkeypatch):
+        """改别的设置时整份重写,不能把 ambient 冲回默认。"""
+        store = make_store(tmp_path, monkeypatch)
+        settings = store.load_settings()
+        settings["ambient_effect"] = "flow"
+        store.save_settings(settings)
+        settings["play_mode"] = "shuffle"
+        store.save_settings(settings)
+        reloaded = store.load_settings()
+        assert reloaded["ambient_effect"] == "flow"
+        assert reloaded["play_mode"] == "shuffle"
+
+
 class TestRecentSettings:
     """「最近」列表设置:recent_max(1~50,默认 8)与 recent_lists 栈。"""
 

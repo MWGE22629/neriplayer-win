@@ -5091,14 +5091,6 @@ class MainWindow(QMainWindow):
         self._reset_window_title()  # 停止播放:任务栏恢复基础标题
         self.statusBar().showMessage(tr("common.stopped"))
 
-    def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-        super().showEvent(event)
-        # 建窗阶段设置透明属性时控件尚未显示,repolish 不生效;
-        # 首次显示后再应用一次,确保流光档的透明样式真的落地。
-        if not getattr(self, "_flow_applied_on_show", False):
-            self._flow_applied_on_show = True
-            self._apply_ambient_effect()
-
     def _show_main_window(self) -> None:
         self.show()
         self.showNormal()

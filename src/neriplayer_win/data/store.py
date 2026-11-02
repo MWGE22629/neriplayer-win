@@ -851,6 +851,10 @@ class LocalStore:
             merged[SETTING_LANGUAGE] = settings[SETTING_LANGUAGE]
         if isinstance(settings.get(SETTING_DYNAMIC_COLOR), bool):
             merged[SETTING_DYNAMIC_COLOR] = settings[SETTING_DYNAMIC_COLOR]
+        ambient = settings.get(SETTING_AMBIENT_EFFECT)
+        ambient = _AMBIENT_ALIASES.get(ambient, ambient)
+        if ambient in _VALID_AMBIENT_EFFECTS:
+            merged[SETTING_AMBIENT_EFFECT] = ambient
         merged[SETTING_VOLUME] = _validated_volume(settings.get(SETTING_VOLUME))
         merged[SETTING_SIDEBAR_EXPANDED] = _validated_sidebar_expanded(
             settings.get(SETTING_SIDEBAR_EXPANDED)
