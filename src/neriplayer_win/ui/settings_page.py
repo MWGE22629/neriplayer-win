@@ -47,7 +47,6 @@ _APPEARANCE_ITEMS = [
 ]
 # M9 流光背景三档:关闭 / 动态纯色 / 流光
 _AMBIENT_ITEMS = [
-    ("settings.ambient.off", "off"),
     ("settings.ambient.solid", "solid"),
     ("settings.ambient.flow", "flow"),
 ]

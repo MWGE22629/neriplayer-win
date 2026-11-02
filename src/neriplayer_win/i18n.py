@@ -321,8 +321,7 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "settings.about_upstream": ("上游仓库:{url}", "Upstream repository: {url}"),
     # -- 播放统计 ---------------------------------------------------------------
     "settings.ambient": ("背景效果:", "Background:"),
-    "settings.ambient.off": ("关闭", "Off"),
-    "settings.ambient.solid": ("动态纯色", "Dynamic solid"),
+    "settings.ambient.solid": ("纯色", "Solid"),
     "settings.ambient.flow": ("流光", "Flow"),
     "settings.stats_group": ("播放统计", "Playback Stats"),
     "settings.stats_open": ("查看统计", "View stats"),

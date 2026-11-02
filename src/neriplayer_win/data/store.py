@@ -59,13 +59,14 @@ SETTING_APPEARANCE = "appearance"
 SETTING_PLAY_QUALITY = "play_quality"
 SETTING_LANGUAGE = "language"
 SETTING_DYNAMIC_COLOR = "dynamic_color"
-# M9 流光背景:关闭 / 动态纯色 / 流光。默认关闭,保持既有观感不变。
+# M9 流光背景:纯色 / 流光。默认纯色 = 不加任何特效,保持既有观感。
 SETTING_AMBIENT_EFFECT = "ambient_effect"
-AMBIENT_OFF = "off"
 AMBIENT_SOLID = "solid"
 AMBIENT_FLOW = "flow"
-DEFAULT_AMBIENT_EFFECT = AMBIENT_OFF
-_VALID_AMBIENT_EFFECTS = (AMBIENT_OFF, AMBIENT_SOLID, AMBIENT_FLOW)
+DEFAULT_AMBIENT_EFFECT = AMBIENT_SOLID
+_VALID_AMBIENT_EFFECTS = (AMBIENT_SOLID, AMBIENT_FLOW)
+# 旧版本存过 "off",加载时当作纯色处理
+_AMBIENT_ALIASES = {"off": AMBIENT_SOLID}
 # 播放音量(0-100 整数):记住上次退出时的值,启动时回填到播放条与 mpv。
 # 默认 70,与 PlayerEngine / PlayerBar 的出厂值一致(M10)。
 SETTING_VOLUME = "volume"
@@ -814,6 +815,7 @@ class LocalStore:
         if isinstance(data.get(SETTING_DYNAMIC_COLOR), bool):
             merged[SETTING_DYNAMIC_COLOR] = data[SETTING_DYNAMIC_COLOR]
         ambient = data.get(SETTING_AMBIENT_EFFECT)
+        ambient = _AMBIENT_ALIASES.get(ambient, ambient)
         if ambient in _VALID_AMBIENT_EFFECTS:
             merged[SETTING_AMBIENT_EFFECT] = ambient
         merged[SETTING_VOLUME] = _validated_volume(data.get(SETTING_VOLUME))

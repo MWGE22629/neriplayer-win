@@ -47,7 +47,7 @@ _RADIUS_SCALE = 0.95
 # 光斑强度上限(alpha 峰值)。真机 shader 输出不透明色、不叠暗底,
 # 这里靠 alpha 层层叠加出亮部;0.40 太暗(实测整体近黑),取 0.85
 # 让最亮处接近真机的 V=0.68。
-_ALPHA_GAIN = 0.75
+_ALPHA_GAIN = 2.1
 # 色标取样段数:13 个停止点足够贴合陡衰减曲线
 _STOPS = 13
 # 目标帧率:50fps;对缓慢漂移足够,比 60fps 省电
@@ -223,31 +223,8 @@ class FlowBackground(QWidget):
         b = sum(c[2] for c in self._colors) / n
         if self._dark:
             # 暗色主题:再压暗一档,保持整体深色基调
-            return QColor.fromRgbF(r * 0.72, g * 0.72, b * 0.72)
+            return QColor.fromRgbF(r * 0.26, g * 0.26, b * 0.26)
         return QColor.fromRgbF(r, g, b)
-
-    def _paint_solid(self, painter: QPainter, width: int, height: int) -> None:
-        """纯色档:主色 + 相邻明度的纵向渐变,比纯平涂有一点体积。"""
-        rgb = self._colors[0]
-        top = QColor.fromRgbF(*rgb)
-        bottom = QColor.fromRgbF(
-            rgb[0] * 0.72, rgb[1] * 0.72, rgb[2] * 0.72
-        )
-        if self._dark:
-            top.setAlphaF(0.30)
-            bottom.setAlphaF(0.12)
-        else:
-            top.setAlphaF(0.26)
-            bottom.setAlphaF(0.10)
-        gradient = QLinearGradient(0, 0, 0, height)
-        gradient.setColorAt(0.0, top)
-        gradient.setColorAt(1.0, bottom)
-        painter.fillRect(QRectF(0, 0, width, height), gradient)
-        veil = QLinearGradient(0, 0, 0, height)
-        veil.setColorAt(0.0, QColor(10, 11, 14, 90))
-        veil.setColorAt(0.55, QColor(10, 11, 14, 20))
-        veil.setColorAt(1.0, QColor(10, 11, 14, 100))
-        painter.fillRect(QRectF(0, 0, width, height), veil)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         # 本控件设了 WA_OpaquePaintEvent(Qt 不会替它清屏),所以每条路径
@@ -259,9 +236,10 @@ class FlowBackground(QWidget):
             painter.end()
             return
 
-        if not self._enabled:
-            # 关闭档:铺一层纯底色(不画光斑,省掉 5 个全屏渐变,
-            # 实测单帧 6-14ms)。不能直接 return:那样会留下上一帧残影。
+        if not self._enabled or self._solid:
+            # 纯色档 = 不加任何特效:铺一层与主题一致的底色,不画光场。
+            # 不能直接 return(控件设了 WA_OpaquePaintEvent,不留残影),
+            # 也不能画渐变:用户明确要求纯色档就是原本的干净底色。
             painter.fillRect(QRectF(0, 0, width, height), self._base)
             painter.end()
             return
@@ -271,12 +249,6 @@ class FlowBackground(QWidget):
         # 不透明颜色(五色按权重平均),不是"深底 + 半透明叠加";若铺深灰底,
         # 光场怎么叠都比真机暗一档(实测反复踩过)。
         painter.fillRect(QRectF(0, 0, width, height), self._average_color())
-
-        if self._solid:
-            # 纯色档:主色双色标渐变,不画光斑
-            self._paint_solid(painter, width, height)
-            painter.end()
-            return
 
         # 斜向波形扰动:真机 shader 里 uv += motionEase * 0.0062 *
         # vec2(ribbonWave, -ribbonWave*0.75),作用在整幅采样坐标上,
@@ -288,7 +260,10 @@ class FlowBackground(QWidget):
         painter.save()
         painter.translate(ribbon * width, -ribbon * 0.75 * height)
 
-        # 五个光斑依次叠加;顺序进 SourceOver,后画的盖住先画的
+        # Plus 相加:SourceOver 的单层 alpha 上限(1.0)把亮度锁死,
+        # 实测增益加到 2.5 最亮也只有 102,到不了真机的 200+。
+        # 发灰问题靠「底色压到很暗 + 光斑高饱和」解决,而不是放弃相加。
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
         for index, (px, py, radius) in enumerate(_POINTS):
             x = (px + _DRIFT * math.sin(self._t + py)) * width
             y = (py + _DRIFT * math.cos(self._t + px)) * height
@@ -303,6 +278,7 @@ class FlowBackground(QWidget):
                 gradient.setColorAt(frac, color)
             painter.fillRect(QRectF(0, 0, width, height), gradient)
 
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         painter.restore()  # 结束波形扰动的坐标系变换
 
         # 噪声打散色带(只压 5% 不透明度,肉眼是细颗粒)
@@ -325,8 +301,8 @@ class FlowBackground(QWidget):
             max(width, height) * 0.78,
         )
         vignette.setColorAt(0.0, QColor(8, 9, 13, 0))
-        vignette.setColorAt(0.50, QColor(8, 9, 13, 30))
-        vignette.setColorAt(1.0, QColor(8, 9, 13, 185))
+        vignette.setColorAt(0.42, QColor(8, 9, 13, 60))
+        vignette.setColorAt(1.0, QColor(8, 9, 13, 205))
         painter.fillRect(QRectF(0, 0, width, height), vignette)
 
         # 顶亮底暗:保证标题与底栏文字对比度,同时强化纵深

@@ -225,7 +225,7 @@ class TestLocalStoreSettings:
             "recent_lists": [],
             "language": "zh",
             "dynamic_color": True,
-            "ambient_effect": "off",  # M9 流光背景
+            "ambient_effect": "solid",  # M9 流光背景:默认纯色(无特效)
             "volume": 70,
         }
 

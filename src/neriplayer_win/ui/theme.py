@@ -119,9 +119,40 @@ QWidget {
 #mainSidebar[flowTransparent="true"]::branch {
     background: transparent;
 }
-/* 播放条:半透明浮起,透出底部光场 */
+/* 内容页栈与其页面:QWidget 的通用 background:@surface 会逐层铺底,
+   WA_TranslucentBackground 压不住 QSS 背景,必须在这里显式设透明 */
+#mainStack[flowTransparent="true"],
+#mainStack[flowTransparent="true"] > QWidget {
+    background: transparent;
+}
+/* 空态视图:光场亮部会让居中提示文字发虚,给它一层轻微压暗的底 */
+#emptyStateView[flowTransparent="true"] {
+    background: rgba(12, 14, 18, 110);
+    border-radius: 16px;
+}
+/* 歌曲表:流光档下表格与交替行都不铺底,让光场连续透出。
+   交替行底色在光场上会形成一条条黑带,与"整页一个背景"冲突。 */
+#mainStack[flowTransparent="true"] QTableWidget,
+#mainStack[flowTransparent="true"] QTableWidget::item {
+    background: transparent;
+    alternate-background-color: transparent;
+}
+#mainStack[flowTransparent="true"] QHeaderView::section {
+    background: transparent;
+}
+/* 状态栏:流光档下同样去底,与整页连成一片 */
+QStatusBar[flowTransparent="true"] {
+    background: transparent;
+    border-top: 1px solid rgba(255, 255, 255, 24);
+}
+/* 播放条:流光档下完全去底,与整页连成一片(不再有独立色块)。
+   注意这里不能用半透明 rgba:叠在光场上会形成一块边界分明的暗色卡。 */
 #playerBar[flowTransparent="true"] {
-    background: rgba(30, 33, 37, 200);
+    background: transparent;
+}
+/* 播放条内的滑块:槽用半透明白,压在光场上不产生实色块 */
+#playerBar[flowTransparent="true"] QSlider::groove:horizontal {
+    background: rgba(255, 255, 255, 30);
 }
 /* 播放条内的歌名信息区:这是叠在播放条上的浮层,底色要跟着透明,
    否则在光场上会留一块硬边黑矩形(实测) */
