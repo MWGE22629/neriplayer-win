@@ -3,7 +3,8 @@
 背景:第三方标题中主字体不覆盖的字符(emoji/泰文/阿拉伯-印度数字等)
 会让 DirectWrite 加载整套回退字体,实测 +45~50MB 常驻 WorkingSet
 (docs/PERF.md「字形回退陷阱」)。sanitize_with 是纯函数核心;
-GDI 集成路径依赖本机「微软雅黑 UI」(Windows 系统字体,套件环境恒有)。
+真实平台按应用字体本身(QRawFont)探测,离屏套件没有字体引擎、走 GDI,
+两条路径都依赖本机「微软雅黑 UI」(Windows 系统字体,套件环境恒有)。
 """
 
 from __future__ import annotations
@@ -12,7 +13,8 @@ import sys
 
 import pytest
 
-from neriplayer_win.ui.textsafe import sanitize_ui_text, sanitize_with
+from neriplayer_win.ui import textsafe
+from neriplayer_win.ui.textsafe import disable_font_fallback, sanitize_ui_text, sanitize_with
 
 
 class TestSanitizeWith:
@@ -37,9 +39,10 @@ class TestSanitizeWith:
         # 数学字母/带圈数字/全角归一成 ASCII 后即可保留
         assert sanitize_with("𝕏①！", self._covered_ascii) == "X1!"
 
-    def test_empty_and_all_unsafe_fallback(self):
+    def test_all_unsafe_kept_empty(self):
+        # 全部不可用时保留空串:所在行有封面可辨,「?」反而是干扰
         assert sanitize_with("", self._covered_ascii) == ""
-        assert sanitize_with("中中", self._covered_ascii) == "?"
+        assert sanitize_with("中中", self._covered_ascii) == ""
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="GDI 字形探测仅 Windows")
@@ -68,7 +71,64 @@ class TestSanitizeUiText:
         # emoji(U+1F60A)与数学字母(U+1D54F):非 BMP 一律视为未覆盖
         result = sanitize_ui_text("𝕏𝟚😊")
         assert result == "X2"  # 𝕏/𝟚 先经 NFKC 救回,😊 省略
+        assert sanitize_ui_text("🎵😊") == ""  # 整段不可用:留空,不兜底
 
     def test_fullwidth_rescued_by_nfkc(self, qapp):
         # 全角字母数字 NFKC 归一为半角(即使字体本身也覆盖全角形态)
         assert sanitize_ui_text("ＮｅｒｉＰｌａｙｅｒ") == "NeriPlayer"
+
+
+class TestHardening20261125:
+    """一个组合重音符(U+0301)让 DirectWrite 翻遍全部系统字体(+86MB)后的加固。"""
+
+    def test_probe_uses_app_font_glyph_table(self, monkeypatch):
+        # 真实平台按应用字体本身(QRawFont)的字形表判定,与渲染同一套字体;
+        # 离屏没有字体引擎,这里桩一个:♪ 无字形,其余有
+        class FakeFont:
+            @staticmethod
+            def glyphIndexesForString(text):
+                return [0 if ch == "\u266a" else 1 for ch in text]
+
+        monkeypatch.setattr(textsafe, "_resolve_raw_font", lambda: FakeFont())
+        textsafe.reset_cache()
+        try:
+            assert sanitize_ui_text("歌\u266a单") == "歌单"
+        finally:
+            textsafe.reset_cache()
+
+    def test_every_widget_disallows_font_merging(self, qapp):
+        from PySide6.QtGui import QFont
+        from PySide6.QtWidgets import (
+            QApplication,
+            QLabel,
+            QStatusBar,
+            QTreeWidget,
+            QWidget,
+        )
+
+        no_merging = QFont.StyleStrategy.NoFontMerging
+        saved_font, saved_sheet = qapp.font(), qapp.styleSheet()
+        try:
+            window = QWidget()
+            tree = QTreeWidget(window)
+            QStatusBar(window)
+            QLabel("x", window)
+            # 首次挂 QSS 时 Qt 会重建主题类字体表:项视图/状态栏等的天然字体
+            # 取自那张表而非应用字体,只改应用字体盖不住它们
+            qapp.setStyleSheet("QWidget { font-size: 13px; }")
+            window.show()
+            qapp.processEvents()
+
+            disable_font_fallback(qapp)
+
+            assert qapp.font().styleStrategy() & no_merging
+            for widget in (window, tree, *qapp.allWidgets()):
+                assert widget.font().styleStrategy() & no_merging, type(
+                    widget
+                ).__name__
+            # 之后再建的控件(含 tooltip 的类字体)同样不合并
+            assert QTreeWidget().font().styleStrategy() & no_merging
+            assert QApplication.font("QTipLabel").styleStrategy() & no_merging
+        finally:
+            qapp.setStyleSheet(saved_sheet)
+            qapp.setFont(saved_font)

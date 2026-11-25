@@ -100,7 +100,9 @@ class QueueWindow(QWidget):
     @staticmethod
     def _row_text(song, current: bool) -> str:
         text = song.title if not song.artist else f"{song.title} - {song.artist}"
-        marker = "▶ " if current else ""
+        # 「●」在主字体(微软雅黑)字形集内;原来的「▶」不在,而字体合并
+        # 已由 disable_font_fallback 关死,画出来会是空框
+        marker = "● " if current else ""
         return f"{marker}{text}"
 
     def _row_text_at(self, row: int, current: bool) -> str:

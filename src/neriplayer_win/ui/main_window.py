@@ -3837,7 +3837,9 @@ class MainWindow(QMainWindow):
         actions: list = []
         for playlist in self._local_playlists:
             already = any(item.key == probe.key for item in playlist.items)
-            label = sanitize_ui_text(playlist.name)
+            # 菜单项没有封面可辨:名字全不可用时保留「?」(其余带封面的
+            # 行留空,见 textsafe.sanitize_with)
+            label = sanitize_ui_text(playlist.name) or "?"
             if already:
                 label = f"{label}{tr('local.already_tag')}"
             action = menu.addAction(label)

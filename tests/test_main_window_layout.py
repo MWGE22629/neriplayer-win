@@ -179,6 +179,27 @@ class TestSidebarTreeStructure:
             _close(window)
 
 
+    def test_all_unusable_playlist_name_kept_empty(self, qapp, monkeypatch, tmp_path):
+        """名字全由主字体不覆盖的字符组成时留空,不兜底「?」。
+
+        行上有封面可辨,「?」是干扰(2026-11-25 用户反馈);非 BMP 的
+        emoji 不经探测直接省略,离屏环境下判定同样确定。
+        """
+        window = _make_window(qapp, monkeypatch, tmp_path)
+        try:
+            window._account = NeteaseAccount(user_id=1, nickname="测试")
+            window._playlists = [
+                NeteasePlaylist(id=7, name="\U0001F3B5\U0001F3B6", track_count=3),
+                NeteasePlaylist(id=8, name="歌单B", track_count=5),
+            ]
+            window._rebuild_sidebar()
+            netease = window.sidebar.find_header("netease")
+            assert netease.child(0).text(0) == "(3)"
+            assert netease.child(1).text(0) == "歌单B(5)"
+        finally:
+            _close(window)
+
+
 class TestSidebarCollapse:
     def test_every_section_arrow_rotates_on_toggle(
         self, qapp, monkeypatch, tmp_path

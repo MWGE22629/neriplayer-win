@@ -43,6 +43,59 @@ dev 1113 ms / 136 MB。真实使用(非热缓存)启动日志实测 2.3-2.9s。
 - dev 常驻 128MB < 发行 148MB:Nuitka 常量段映射 + 静态链接运行时,
   与历史版本同规律。
 
+## v0.9.9 复测(2026-11-25,字体回退硬闸)
+
+v0.9.8 打包冒烟报常驻 231MB 超线(v0.9.7 同机 221MB),对比 v0.8.1 的
+148MB
+「涨了 80MB」。结论:**不是版本回归,是「字形回退陷阱」第三次中招**——
+一个歌单名里的组合重音符 U+0301,撞上 10 月底本机字体环境的变化。
+
+| 目标 | 冷启动中位(5 次) | 常驻 WorkingSet(空闲 20s) | 私有提交 | 验收线 | 判定 |
+| --- | --- | --- | --- | --- | --- |
+| 发行 exe | **639 ms** | **149 MB**(修复前 231) | 89 MB | ≤1.5s / ≤200MB | **PASS** |
+| dev 对照 | 678 ms | 130 MB(修复前 211) | 87 MB | (对照) | — |
+
+### 定位过程
+
+1. **按 tag 对比排除版本因素**:v0.8.1 与 v0.9.8 源码同机同日各测一遍,
+   都是 211MB——同一份 v0.8.1 代码比 10-11 的记录多了 80MB,变量在环境
+   或数据,不在代码差异。
+2. **按地址空间拆解**(新工具 `tools/mem_breakdown.py`):两版本都映射了
+   **271 个字体文件共 50MB**,私有内存也多约 35MB;空数据目录启动则只有
+   123MB、2 个字体文件 → 与用户数据相关。
+3. **遍历控件文本找主字体不覆盖的字符**(`tools/audit_glyphs.py`):141 个控件的全部文本里只有
+   一个——收藏歌单名 `洗澡时听听这些歌可欢乐啦( ́3`)` 的 U+0301。
+4. **隔离复现**:单独一个 QLabel 显示该文本,进程 65MB → 151MB(+86MB),
+   与回归量吻合;换成含 `▶` 或 `♪` 的文本同样 +86MB。
+
+### 根因
+
+- **漏网原因——GDI 探测被字体替换绕过**:本机注册表 FontSubstitutes 把
+  「Microsoft YaHei / Microsoft YaHei UI / Segoe UI」替换成 PingFang SC。
+  textsafe 的 GDI 探测走替换拿到 PingFang(有 U+0301),判定「已覆盖」
+  放行;实际渲染的 DirectWrite 不认 GDI 替换,用的是雅黑(没有)→ 回退。
+- **代价变大——字体变多**:10-29 系统字体(Segoe 系、ebrima、
+  `Global*.CompositeFont`)被重写,10-30 又装了 SF Pro ×50、PingFang SC
+  ×6。实测本机现在只要有一个缺字形,DirectWrite 就把 **全部 271 个字体
+  文件**映射进进程(+86MB);0.2.0/0.3.0 那两次是 +45~50MB。
+- **顺带发现(系统侧,未改)**:注册表
+  `Fonts\Microsoft YaHei & Microsoft YaHei UI (TrueType)` 的值是空串,
+  雅黑常规体未登记,Qt 请求常规字重只能解析到 Light 面。
+
+### 修复(三处)
+
+1. **探测与渲染同源**(`ui/textsafe.py`):净化改按应用字体本身探测
+   (`QRawFont.glyphIndexesForString`,即 DirectWrite 渲染用的那张字形表);
+   GDI 探测只留给没有字体引擎的离屏测试。
+2. **硬闸 `disable_font_fallback`**:应用字体设 `NoFontMerging`,缺字形
+   至多显示空框,绝不再加载回退字体——净化管不到的静态文案、tooltip、
+   第三方控件内部文本从此也兜得住。调用时机有讲究(见函数说明):
+   须在主题首次挂 QSS 之后,且要给已建控件补发 ApplicationFontChange。
+3. **播放队列当前曲标记 `▶` → `●`**:雅黑没有 `▶`,硬闸之后会变空框。
+
+v0.9.9 修复后同一场景:发行包 149MB,进程内只映射 3 个字体文件;遍历控件文本
+不再有主字体不覆盖的字符。
+
 ## 历史版本测量(同口径摘要)
 
 | 版本 | 日期 | 发行冷启动 | 发行常驻 | 备注 |
@@ -54,10 +107,13 @@ dev 1113 ms / 136 MB。真实使用(非热缓存)启动日志实测 2.3-2.9s。
 | 0.7.2 | 09-26 | 804 ms | 143 MB | 任务栏工具栏+五组动效(冷启动较 0.4.x 漂移 +260ms,当时未深究;0.8.1 复盘确认主因是 platform.platform 随 v0.6.3 日志特性引入,WebEngine import 链则自 v0.1.0 就在) |
 | 0.8.0 | 10-11 | 979 ms | 157 MB | 路由守卫+封面 LRU;常驻破 150MB 线,验收线放宽到 200MB |
 | 0.8.1 | 10-11 | 744 ms | 148 MB | 启动性能修复(见上) |
+| 0.9.7 | 11-25 | — | 221 MB | 字体回退风暴(见 v0.9.9 复测;非版本回归,同机环境所致) |
+| 0.9.8 | 11-25 | — | 231 MB | 字体回退风暴,超线(见 v0.9.9 复测) |
+| 0.9.9 | 11-25 | 639 ms | 149 MB | 字体回退硬闸;与 v0.9.8 同机同日 |
 
 ## 重要经验(长期有效)
 
-### 字形回退陷阱(0.2.0/0.3.0 两度中招)
+### 字形回退陷阱(0.2.0/0.3.0/0.9.8 三度中招)
 
 UI 文本出现主字体(微软雅黑)不覆盖的字符时,DirectWrite 会整套加载
 回退字体并映射进进程:**侧栏两个几何符号「▾/▸」就带来 +45~50MB 常驻**;
@@ -67,6 +123,12 @@ UI 文本出现主字体(微软雅黑)不覆盖的字符时,DirectWrite 会整�
   `ui/textsafe.py`(NFKC 归一 + GDI GetGlyphIndices 探测,未覆盖码点
   静默省略);`test_sidebar_text_has_no_exotic_glyph` 拦截静态文案。
 - 结论:UI 文本只用主字体与 CJK 覆盖的字符。
+- **v0.9.9 加固后的三条**:(1) 净化探测必须与渲染同源——GDI 会走
+  FontSubstitutes,与 DirectWrite 判定不一致就会放行漏网字符;
+  (2) `disable_font_fallback` 是最后一道闸,漏网字符只显示空框;
+  (3) 同一版本常驻内存突然上涨,先跑 `tools/mem_breakdown.py`:字体
+  映射行超过个位数即回退泄漏,不必先怀疑代码。装字体、改字体替换、
+  系统更新都可能让同一个字符从「便宜」变成「+86MB」。
 
 ### 测量口径(复测必读)
 
@@ -92,8 +154,13 @@ UI 文本出现主字体(微软雅黑)不覆盖的字符时,DirectWrite 会整�
 - Python 3.12.**,PySide6 6.11.2,Nuitka(standalone + LTO)
 - 工具:`uv run python tools/measure_perf.py --target both --runs 5 --idle 20`
   阶段剖析:`uv run python tools/profile_startup.py`
+  内存拆解:`uv run python tools/mem_breakdown.py --target dist`
+  (按镜像/映射文件/私有归类常驻页;`--pythonpath <旧版本 src>` 配合
+  `--json` 与 `--diff A B` 可对两个版本做差)
+  字形审计:`uv run python tools/audit_glyphs.py`(报出哪段控件文本含主字体
+  不覆盖的字符;退出码 0 表示干净)
 
-## 发行目录体积(0.8.1 约 464 MB / 159 文件)
+## 发行目录体积(0.9.8 约 457.5 MB / 156 文件)
 
 | 体积 | 内容 |
 | --- | --- |
@@ -115,4 +182,5 @@ devtools/调试 pak;Qt 翻译仅 zh_CN;Chromium locale 仅 zh-CN + en-US;
 ```bash
 uv run python tools/build_exe.py                        # 重建(增量约 1-2 分钟)
 uv run python tools/measure_perf.py --target both       # 复测,输出汇总与判定
+uv run python tools/mem_breakdown.py --target dist      # 超线时先看是不是字体映射
 ```

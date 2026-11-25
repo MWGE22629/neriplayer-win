@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QApplication
 from .ui.covers import schedule_disk_cache_trim
 from .ui.icons import app_icon
 from .ui.main_window import MainWindow
+from .ui.textsafe import disable_font_fallback
 
 # 静音 qt.qpa.fonts 的 Fixedsys 告警:QtWebEngine 请求等宽字体回退时会
 # 点名 Windows 古老位图字体 Fixedsys,DirectWrite 无法为它生成字形,
@@ -63,6 +64,7 @@ def main() -> int:
     _boost_process_priority()  # M5:后台播放场景改善切歌与 UI 响应
     schedule_disk_cache_trim()  # 封面磁盘缓存 LRU 定量清理(32MiB,后台)
     window = MainWindow()
+    disable_font_fallback(app)  # 字形回退硬闸:须在主题挂上 QSS 之后
     report("窗构完")
     window.show()
     return app.exec()
