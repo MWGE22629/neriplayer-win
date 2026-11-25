@@ -2,12 +2,14 @@
 
 三条口径(见 docs/research/M9-overview.md):
 1. 播放时长 = 累计实际收听时长。墙钟增量累加,暂停停表,seek 不计。
-2. 播放次数 = 听满 30 秒 +1,或整曲播完 +1,每个播放周期最多 +1。
+2. 播放次数 = 听满 15 秒 +1,或整曲播完 +1,每个播放周期最多 +1
+   (阈值见 play_stats.MIN_LISTEN_MS_FOR_PLAY_COUNT)。
 3. 暂停必须由 playing_changed(False) 立即停表,不能只靠位置判据:
    实测 mpv 在 set_paused(True) 之后、真正停下之前会漏出一个带
    +38ms 增量的 tick,只靠「位置在推进就计时」会把这段算进去。
 
-与 Android 端(PlaybackStatsTracker)口径一致,便于数据对照。
+与 Android 端(PlaybackStatsTracker)口径一致,便于数据对照;
+唯一差异是计次阈值(桌面端 15 秒,Android 30 秒)。
 """
 
 from __future__ import annotations
@@ -53,7 +55,7 @@ class PlayStatsTracker:
         self._counting = False
         self._segment_start = 0.0
         self._accumulated_ms = 0  # 本周期已累计、待 flush 的毫秒
-        self._session_listened_ms = 0  # 本播放周期累计收听(判 30 秒阈值)
+        self._session_listened_ms = 0  # 本播放周期累计收听(判 15 秒阈值)
         # 计数
         self._counted_this_period = False
         # 位置
@@ -135,7 +137,7 @@ class PlayStatsTracker:
     def take_delta(self, force_count: bool = False) -> StatsDelta | None:
         """取走累计增量(时长 + 本周期尚未取走的计数);无增量返回 None。
 
-        force_count 为真表示无条件计一次(整曲播完),不再看 30 秒阈值。
+        force_count 为真表示无条件计一次(整曲播完),不再看 15 秒阈值。
         """
         count = self._settle_count_if_needed(force=force_count)
         if self._accumulated_ms <= 0 and count == 0:
@@ -166,7 +168,7 @@ class PlayStatsTracker:
         self._counting = False
 
     def _settle_count_if_needed(self, force: bool = False) -> int:
-        """按 30 秒阈值结算本周期计数;force 为真时无条件计一次。"""
+        """按 15 秒阈值结算本周期计数;force 为真时无条件计一次。"""
         if self._counted_this_period:
             return 0
         if force or self._session_listened_ms >= MIN_LISTEN_MS_FOR_PLAY_COUNT:

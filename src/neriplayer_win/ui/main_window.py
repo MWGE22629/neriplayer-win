@@ -4105,6 +4105,8 @@ class MainWindow(QMainWindow):
             # 解析成功但没有任何可用地址:同样是播放失败,走统一出口
             self._handle_play_failure(song, tr("play.no_url"))
             return
+        # 新播放周期开始(结算上一首):须早于 play_url,见 _stats_begin_song
+        self._stats_begin_song(song)
         # 音质标签随起播一起刷新:解析层已给出最终生效档位(含降级回退)
         self.player_bar.set_quality_parts(quality_key, quality_kbps)
         self._active = _ActivePlay(
@@ -4123,7 +4125,6 @@ class MainWindow(QMainWindow):
         self.engine.play_url(url, headers)
         self._push_recent()  # 成功起播才算「听过」(仅浏览不压栈)
         self._schedule_prefetch_next()  # 起播成功:顺手后台预取下一首
-        self._stats_begin_song(song)  # 新播放周期开始(结算上一首)
 
     # -- 流光背景 --------------------------------------------------------------
 
@@ -4300,11 +4301,30 @@ class MainWindow(QMainWindow):
     # -- 播放统计 --------------------------------------------------------------
 
     def _stats_begin_song(self, song: QueueSong) -> None:
-        """起播时开新统计周期;上一首的遗留增量在此结算落盘。"""
-        key = make_key(song.source, song.id, song.bvid)
-        leftover = self._stats_tracker.on_song_changed(key)
-        self._stats_apply_delta(key, leftover, song)
+        """起播时开新统计周期;上一首的遗留增量记回上一首。
+
+        必须在 engine.play_url() **之前**调用:play_url 同步发
+        playing_changed(True) 让 tracker 开表,之后再 on_song_changed
+        会把刚开的表结算并复位,整首歌都不再计时(v0.9.3~v0.9.7
+        实测每首只落十几毫秒)。
+        """
+        prev_key = self._stats_tracker.key
+        leftover = self._stats_tracker.on_song_changed(
+            make_key(song.source, song.id, song.bvid)
+        )
+        if prev_key:
+            self._stats_apply_delta(prev_key, leftover, self._stats_current_song())
         self._stats_ensure_timer()
+
+    def _stats_current_song(self) -> QueueSong | None:
+        """统计周期对应的那首歌:增量首次落表时靠它建条目。
+
+        _stats_begin_song 先于 _start_play 换 _active 调用,所以切歌时
+        这里返回的还是上一首;其余时刻就是当前曲。取走的增量必须带着
+        歌曲落表,否则条目尚未建(听不足 15 秒)时会被整段丢弃。
+        """
+        active = self._active
+        return active.song if active is not None else None
 
     def _stats_ensure_timer(self) -> None:
         """惰性启动 250ms 统计定时器(与引擎进度轮询同频)。
@@ -4323,13 +4343,13 @@ class MainWindow(QMainWindow):
         self._stats_timer = timer
 
     def _stats_on_tick(self) -> None:
-        """250ms tick:喂给 tracker,并按周期落盘。
+        """250ms tick:喂给 tracker,并按周期把增量并入内存表后落盘。
 
-        窗口不可见(托盘/最小化)时不跑:统计靠墙钟增量,隐藏期间本来
-        就不该计时,跳过也顺带避免后台空转。
+        收进托盘只是隐藏窗口:进程仍在、音频仍在出声,照常计时
+        (口径:只有音频在出声推进时计时)。增量必须在这里取走,
+        否则 tracker 里的累计要等到暂停/切歌才进内存表,中途被杀
+        会整首丢失(设计上界是 15 秒)。
         """
-        if not self.isVisible():
-            return
         engine = self.engine
         if engine is None:
             return
@@ -4337,6 +4357,11 @@ class MainWindow(QMainWindow):
         duration = engine.duration()
         self._stats_tracker.on_progress(position, duration)
         if self._stats_tracker.should_flush():
+            self._stats_apply_delta(
+                self._stats_tracker.key,
+                self._stats_tracker.take_delta(),
+                self._stats_current_song(),
+            )
             self._stats_flush()
 
     def _stats_apply_delta(
@@ -4345,7 +4370,7 @@ class MainWindow(QMainWindow):
         delta: object,
         song: QueueSong | None = None,
     ) -> None:
-        """把增量写进内存表。song 为 None 时只在已有条目上累加。"""
+        """把增量写进内存表。song 用于首次建条目;_active 在位时增量永不丢弃。"""
         if delta is None:
             return
         listened = getattr(delta, "listened_ms", 0)
@@ -4388,7 +4413,7 @@ class MainWindow(QMainWindow):
         if not key:
             return
         delta = self._stats_tracker.take_delta()
-        self._stats_apply_delta(key, delta)
+        self._stats_apply_delta(key, delta, self._stats_current_song())
         self._stats_flush()
 
     def _stats_on_track_ended(self) -> None:
@@ -4397,7 +4422,7 @@ class MainWindow(QMainWindow):
         if not key:
             return
         delta = self._stats_tracker.on_track_ended()
-        self._stats_apply_delta(key, delta)
+        self._stats_apply_delta(key, delta, self._stats_current_song())
         self._stats_flush()
 
     def _ensure_stats_page(self) -> StatsPage:
@@ -4682,7 +4707,7 @@ class MainWindow(QMainWindow):
     def _on_track_ended(self) -> None:
         """一首播完:按模式自动接播(单曲循环重播当前,顺序到尾即停)。"""
         self._play_fail_count = 0  # 正常播完一首:连续失败计数复位
-        # 统计:整曲播完无条件计一次(短曲不足 30 秒也算)
+        # 统计:整曲播完无条件计一次(短曲不足 15 秒也算)
         self._stats_on_track_ended()
         if self._queue.mode() is PlayMode.REPEAT_ONE and self._active is not None:
             url = self._active.rotator.current

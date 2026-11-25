@@ -2,7 +2,7 @@
 
 锁住三条最容易写错的规则:
 1. 暂停停表(包括 mpv 暂停生效前漏出的那个 tick);
-2. 听满 30 秒才算一次,整曲播完无条件算一次,每周期最多一次;
+2. 听满 15 秒才算一次,整曲播完无条件算一次,每周期最多一次;
 3. seek 拖到结尾不算「播完」。
 """
 
@@ -134,19 +134,19 @@ def test_seek_does_not_add_time(tracker, clock):
 
 # -- 计数 --------------------------------------------------------------------
 
-def test_play_count_requires_30_seconds(tracker, clock):
-    """未听满 30 秒不计次。"""
+def test_play_count_requires_15_seconds(tracker, clock):
+    """未听满 15 秒不计次(14 秒是阈值下沿)。"""
     tracker.on_playing_changed(True)
-    clock.advance(20.0)
-    tracker.on_progress(20.0, 200.0)
+    clock.advance(14.0)
+    tracker.on_progress(14.0, 200.0)
     delta = tracker.take_delta()
     assert delta is None or delta.count_inc == 0
 
 
-def test_play_count_at_30_seconds(tracker, clock):
-    """听满 30 秒计一次。"""
+def test_play_count_at_15_seconds(tracker, clock):
+    """听满 15 秒计一次。"""
     tracker.on_playing_changed(True)
-    for i in range(31):
+    for i in range(15):
         clock.advance(1.0)
         tracker.on_progress(float(i + 1), 200.0)
     delta = tracker.take_delta()
@@ -157,12 +157,12 @@ def test_play_count_at_30_seconds(tracker, clock):
 def test_play_count_only_once_per_period(tracker, clock):
     """同一播放周期内多次取增量,只计一次。"""
     tracker.on_playing_changed(True)
-    for i in range(40):
+    for i in range(20):
         clock.advance(1.0)
         tracker.on_progress(float(i + 1), 200.0)
     first = tracker.take_delta()
     assert first is not None and first.count_inc == 1
-    for i in range(40, 60):
+    for i in range(20, 60):
         clock.advance(1.0)
         tracker.on_progress(float(i + 1), 200.0)
     second = tracker.take_delta()
@@ -170,7 +170,7 @@ def test_play_count_only_once_per_period(tracker, clock):
 
 
 def test_track_ended_counts_even_if_short(tracker, clock):
-    """整曲播完无条件计一次(短曲不到 30 秒也算)。"""
+    """整曲播完无条件计一次(短曲不到 15 秒也算)。"""
     tracker.on_playing_changed(True)
     clock.advance(5.0)
     tracker.on_progress(5.0, 5.0)  # 已到结尾
@@ -200,15 +200,15 @@ def test_seek_to_end_does_not_count_as_ended(tracker, clock):
 
 
 def test_song_change_settles_previous_period(tracker, clock):
-    """切歌时结算上一周期:听满 30 秒的应计数。"""
+    """切歌时结算上一周期:听满 15 秒的应计数。"""
     tracker.on_playing_changed(True)
-    for i in range(35):
+    for i in range(20):
         clock.advance(1.0)
         tracker.on_progress(float(i + 1), 200.0)
     leftover = tracker.on_song_changed("netease:2")
     assert leftover is not None
     assert leftover.count_inc == 1
-    assert leftover.listened_ms >= 30_000
+    assert leftover.listened_ms >= 15_000
 
 
 # -- flush 节奏 --------------------------------------------------------------

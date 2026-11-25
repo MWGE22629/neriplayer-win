@@ -3,8 +3,8 @@
 口径(与 docs/research/M9-overview.md 一致):
 - 「播放时长」是这首歌累计被收听的时长,不是最近播放时间,也不是歌曲时长;
   暂停、缓冲、加载中、切歌空档一律不计,seek 跳过的部分不计。
-- 「播放次数」按「听满 30 秒 +1,或整曲播完 +1,每个播放周期最多 +1」计。
-  计数与计时规则本身在 ui/play_stats_tracker.py,本模块只管存取。
+- 「播放次数」按「听满 15 秒 +1,或整曲播完 +1,每个播放周期最多 +1」计。
+  计数与计时规则本身在 data/play_stats_tracker.py,本模块只管存取。
 
 文件与 local_playlists.json 并列,生命周期独立于 settings.json:
 统计是用户产出的不可再生数据,损坏只能清零,不能像界面偏好那样
@@ -27,7 +27,8 @@ PLAY_STATS_FILE = "play_stats.json"
 PLAY_STATS_VERSION = 1
 
 # 一次播放的最短收听时长(毫秒):不足这个时长不计次
-MIN_LISTEN_MS_FOR_PLAY_COUNT = 30_000
+# (Android 端为 30 秒;桌面端按产品要求放宽到 15 秒,其余口径一致)
+MIN_LISTEN_MS_FOR_PLAY_COUNT = 15_000
 
 
 @dataclass
